@@ -4,6 +4,12 @@ Policy values are ``allow``, ``ask`` or ``deny`` per tool name. ``ask`` needs a
 prompter (an interactive UI); without one, ``ask`` means ``deny``. Approval can
 be granted once or for the rest of the session. Nothing is persisted.
 
+A prompter answers with an :class:`Approval` for the simple cases, or with
+:class:`Allow` / :class:`Deny` when it wants to say more: a reason the model
+should see, or corrected arguments. The same two types are what application
+hooks return (:mod:`kennel.hooks`), so there is one vocabulary for "may this
+call proceed" no matter who answers.
+
 This layer is a usability/safety control, not an OS sandbox: an allowed
 ``shell`` tool can bypass the file tools' workspace boundary.
 """
@@ -14,6 +20,7 @@ import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 from .errors import ConfigurationError
 
@@ -38,6 +45,31 @@ class Approval(str, Enum):
 
 
 @dataclass(frozen=True)
+class Allow:
+    """Let the call proceed, optionally with corrected arguments.
+
+    ``updated_arguments`` replaces the call's arguments (they are re-validated).
+    ``remember="session"`` grants the tool for the rest of the session, like
+    :attr:`Approval.SESSION`.
+    """
+
+    updated_arguments: Mapping[str, Any] | None = None
+    remember: str | None = None
+
+    @property
+    def remember_session(self) -> bool:
+        return self.remember == "session"
+
+
+@dataclass(frozen=True)
+class Deny:
+    """Stop the call. ``message`` is what the model is told, so make it actionable."""
+
+    message: str
+    interrupt: bool = False
+
+
+@dataclass(frozen=True)
 class PermissionRequest:
     tool_name: str
     kind: PermissionKind
@@ -46,7 +78,17 @@ class PermissionRequest:
     warnings: tuple[str, ...] = ()
 
 
-Prompter = Callable[[PermissionRequest], Approval]
+@dataclass(frozen=True)
+class PermissionOutcome:
+    """The resolved answer for one call, richer than a bool."""
+
+    allowed: bool
+    message: str | None = None
+    updated_arguments: Mapping[str, Any] | None = None
+    remember_session: bool = False
+
+
+Prompter = Callable[[PermissionRequest], "Approval | Allow | Deny"]
 
 DEFAULT_POLICY: dict[str, Decision] = {
     "glob": Decision.ALLOW,
@@ -118,19 +160,35 @@ class PermissionManager:
         with self._lock:
             return tool_name in self._session_grants
 
-    def check(self, request: PermissionRequest) -> bool:
+    def check(self, request: PermissionRequest, *, decision: Decision | None = None) -> bool:
         """Return True if the call may proceed, prompting if the policy says ``ask``."""
-        decision = self.decision_for(request.tool_name, request.kind)
+        return self.decide(request, decision=decision).allowed
+
+    def decide(self, request: PermissionRequest, *, decision: Decision | None = None) -> PermissionOutcome:
+        """Resolve one call, prompting if the policy says ``ask``.
+
+        The prompter may answer with an :class:`Approval`, or with
+        :class:`Allow` / :class:`Deny` to add a reason or corrected arguments;
+        both reach the caller through :class:`PermissionOutcome`.
+        """
+        if decision is None:
+            decision = self.decision_for(request.tool_name, request.kind)
         if decision is Decision.ALLOW:
-            return True
+            return PermissionOutcome(True)
         if decision is Decision.DENY:
-            return False
+            return PermissionOutcome(False)
         if self.has_session_grant(request.tool_name):
-            return True
+            return PermissionOutcome(True)
         if self._prompter is None:
-            return False  # non-interactive: ask => deny
-        approval = self._prompter(request)
-        if approval is Approval.SESSION:
+            return PermissionOutcome(False)  # non-interactive: ask => deny
+        answer = self._prompter(request)
+        if isinstance(answer, Deny):
+            return PermissionOutcome(False, message=answer.message)
+        if isinstance(answer, Allow):
+            if answer.remember_session:
+                self.grant_session(request.tool_name)
+            return PermissionOutcome(True, updated_arguments=answer.updated_arguments, remember_session=answer.remember_session)
+        if answer is Approval.SESSION:
             self.grant_session(request.tool_name)
-            return True
-        return approval is Approval.ONCE
+            return PermissionOutcome(True)
+        return PermissionOutcome(answer is Approval.ONCE)

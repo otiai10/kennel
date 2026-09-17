@@ -19,6 +19,15 @@ interactive prompter; without one (piped stdin, `--non-interactive`, an applicat
 did not provide a prompter) it means `deny`. Approvals are per call or per session and are
 never persisted.
 
+**Application hooks.** An embedding application can register `before_tool` hooks that run
+after argument validation and **before** the permission check, so an application policy can
+deny calls the permission policy would allow (`kennel.Hooks`). Hooks tighten, they do not
+loosen: `Allow` from a hook still goes through the normal permission check, and the only
+thing it can skip is the interactive prompt (`Allow(remember="session")`, the same grant the
+user could give). A hook that raises fails the tool call rather than being ignored, so a
+crashing policy cannot silently disable itself. Hook-rewritten arguments are re-validated
+and still resolved through the workspace boundary.
+
 **Bounded execution.** Tool output is capped (64 KiB by default), reads are line-range
 bounded, `shell` has a timeout and runs without stdin, and each turn has a tool call
 budget plus repeated-call detection.

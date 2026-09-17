@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import KennelConfig, load_config
 from .events import EventBus
+from .hooks import Hooks
 from .permissions import Decision, PermissionManager, Prompter
 from .providers.base import ModelProvider
 from .registry import DEFAULT_TOOLS, ToolRegistry, builtin_registry
@@ -48,6 +49,7 @@ class Agent:
         *,
         tools: Iterable[str | Tool] | None = None,
         permissions: Mapping[str, Decision | str] | None = None,
+        hooks: Hooks | None = None,
         provider: ModelProvider | None = None,
         instructions: str | None = None,
         config: KennelConfig | None = None,
@@ -64,6 +66,7 @@ class Agent:
         policy: dict[str, Decision | str] = dict(self.config.permissions)
         policy.update(permissions or {})
         self.permissions = PermissionManager(policy, prompter=prompter)
+        self.hooks = hooks if hooks is not None else Hooks()
         self.provider: ModelProvider = provider if provider is not None else _default_provider()
         self.events = events if events is not None else EventBus()
         self.environment: dict[str, str] = dict(environment or {})

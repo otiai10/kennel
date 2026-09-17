@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from .context import HistoryTurn, compact_history, looks_like_tool_narration
 from .errors import ContextLimitError, KennelError, ProviderError
 from .events import EventType
+from .hooks import run_hook
 from .providers.base import ProviderSession
 from .runner import ToolCallRecord, ToolRunner
 
@@ -63,6 +64,7 @@ class Session:
             agent.events,
             self.id,
             max_tool_calls=agent.config.max_tool_calls,
+            hooks=agent.hooks,
         )
 
     # -- lifecycle ------------------------------------------------------------
@@ -138,9 +140,12 @@ class Session:
         text = ""
         attempt = 0
         timeout = self.agent.config.turn_timeout_seconds
+        # before_prompt applies to what the user asked, not to Kennel's own
+        # re-prompts, and the history keeps the user's words.
+        sent = await self._apply_before_prompt(prompt)
         while True:
             try:
-                text = await asyncio.wait_for(self._generate(prompt, on_delta), timeout)
+                text = await asyncio.wait_for(self._generate(sent, on_delta), timeout)
                 break
             except ContextLimitError:
                 if attempt >= 1 or not self.history:
@@ -186,6 +191,15 @@ class Session:
         self.history.append(Turn(prompt, text, stop_reason, records))
         self._emit(EventType.MODEL_COMPLETED, stop_reason=stop_reason, chars=len(text), tool_calls=len(records))
         return AgentResult(text=text, stop_reason=stop_reason, tool_calls=records, usage=None, session_id=self.id)
+
+    async def _apply_before_prompt(self, prompt: str) -> str:
+        """Append whatever the ``before_prompt`` hooks add to the prompt (additional context)."""
+        extra: list[str] = []
+        for hook in list(self.agent.hooks.before_prompt):
+            added = await run_hook(hook, prompt, self)
+            if added:
+                extra.append(str(added).strip())
+        return "\n\n".join([prompt, *extra]) if extra else prompt
 
     def _should_nudge(self, text: str) -> bool:
         if not self.agent.tools or not self.agent.config.nudge_narration:

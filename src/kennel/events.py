@@ -32,6 +32,7 @@ class EventType:
     TOOL_STARTED = "tool.started"
     TOOL_COMPLETED = "tool.completed"
     TOOL_FAILED = "tool.failed"
+    TOOL_BLOCKED = "tool.blocked"
     CONTEXT_COMPACTED = "context.compacted"
 
 
