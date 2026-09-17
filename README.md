@@ -36,6 +36,31 @@ permissions, bounded tool output, context handling, tracing, and a small CLI.
 
 ## Install
 
+Kennel is not on PyPI yet (the name is pending a [PEP 541 request](https://github.com/pypi/support/issues/12302)).
+Install straight from GitHub. The recommended way is an isolated tool install with [uv](https://docs.astral.sh/uv/)
+or pipx, which puts a `kennel` command on your PATH:
+
+```bash
+uv tool install --with "apple-fm-sdk==0.2.0" "git+https://github.com/otiai10/kennel"
+# or
+pipx install "git+https://github.com/otiai10/kennel" --pip-args "apple-fm-sdk==0.2.0"
+kennel --help
+```
+
+To try it without installing:
+
+```bash
+uvx --from "git+https://github.com/otiai10/kennel" --with "apple-fm-sdk==0.2.0" kennel --help
+```
+
+Plain pip into an existing environment works too. Pin a tag or branch with `@v0.1.0` at the end of the URL.
+
+```bash
+pip install "git+https://github.com/otiai10/kennel" "apple-fm-sdk==0.2.0"
+```
+
+For development, use an editable install:
+
 ```bash
 git clone https://github.com/otiai10/kennel && cd kennel
 python3 -m venv .venv && source .venv/bin/activate
