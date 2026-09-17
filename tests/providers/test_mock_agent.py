@@ -1,6 +1,8 @@
 """Agent/Session behaviour, driven deterministically by MockProvider."""
 
 import asyncio
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -17,6 +19,7 @@ from kennel import (
     Tool,
     ToolParameter,
     ToolResult,
+    TurnCancelledError,
 )
 from kennel.providers.mock import Raise, Sleep, Text, ToolCall
 
@@ -311,3 +314,111 @@ async def test_nudge_disabled_by_config_or_without_tools(meeting_ws):
     assert (await agent.run("x")).text == NARRATION and len(provider.sessions[0].prompts) == 1
     agent, provider, _ = make_agent(meeting_ws, [NARRATION], tools=[])
     assert (await agent.run("x")).text == NARRATION and len(provider.sessions[0].prompts) == 1
+
+
+# -- interrupting a turn ------------------------------------------------------
+
+
+class SlowTool(Tool):
+    """A tool that outlives any reasonable interrupt window."""
+
+    name = "slow"
+    description = "waits"
+
+    async def execute(self, arguments, context):
+        await asyncio.sleep(5)
+        return ToolResult("finished")  # pragma: no cover - the turn is interrupted first
+
+    def summarize(self, arguments):
+        return "Slow"
+
+
+def slow_agent(meeting_ws, turns, **kw):
+    return make_agent(meeting_ws, turns, tools=["glob", SlowTool()], **kw)
+
+
+async def test_interrupt_raises_turn_cancelled_error_promptly(meeting_ws):
+    agent, _, _ = slow_agent(meeting_ws, [[ToolCall("slow", {}), Text("never")]])
+    session = agent.new_session()
+    task = asyncio.create_task(session.run("slow one"))
+    await asyncio.sleep(0.05)
+    started = time.perf_counter()
+    session.interrupt()
+    with pytest.raises(TurnCancelledError):
+        await asyncio.wait_for(task, 1.0)
+    assert time.perf_counter() - started < 1.0
+    await session.close()
+
+
+async def test_session_is_reusable_after_interrupt(meeting_ws):
+    agent, provider, events = slow_agent(meeting_ws, [[ToolCall("slow", {}), Text("never")], "after interrupt"])
+    session = agent.new_session()
+    task = asyncio.create_task(session.run("slow one"))
+    await asyncio.sleep(0.05)
+    session.interrupt()
+    with pytest.raises(TurnCancelledError):
+        await task
+    types = [e.type for e in events]
+    assert EventType.SESSION_CANCELLED in types and EventType.SESSION_COMPLETED not in types
+    assert types[-1] == EventType.SESSION_CANCELLED and provider.sessions[0].closed
+    assert session.history == []  # the interrupted turn is not recorded
+    result = await session.run("again")
+    assert result.text == "after interrupt" and len(provider.sessions) == 2
+    await session.close()  # session.completed belongs to closing, not to the cancelled turn
+    assert [e.type for e in events][-1] == EventType.SESSION_COMPLETED
+
+
+async def test_interrupt_from_another_thread(meeting_ws):
+    agent, _, events = slow_agent(meeting_ws, [[ToolCall("slow", {}), Text("never")]])
+    session = agent.new_session()
+    task = asyncio.create_task(session.run("slow one"))
+    await asyncio.sleep(0.05)
+    thread = threading.Thread(target=session.interrupt)
+    thread.start()
+    with pytest.raises(TurnCancelledError):
+        await asyncio.wait_for(task, 1.0)
+    thread.join()
+    assert EventType.SESSION_CANCELLED in [e.type for e in events]
+    await session.close()
+
+
+async def test_interrupt_releases_a_cancellable_prompter(meeting_ws):
+    class Prompter:
+        def __init__(self) -> None:
+            self.cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def __call__(self, request):  # pragma: no cover - never reached in this turn
+            return Approval.DENY
+
+    prompter = Prompter()
+    agent, _, _ = slow_agent(meeting_ws, [[ToolCall("slow", {}), Text("never")]], prompter=prompter)
+    session = agent.new_session()
+    task = asyncio.create_task(session.run("slow one"))
+    await asyncio.sleep(0.05)
+    session.interrupt()
+    with pytest.raises(TurnCancelledError):
+        await task
+    assert prompter.cancelled
+    from kennel import PermissionManager
+
+    PermissionManager().cancel_prompt()  # no prompter at all
+    PermissionManager(prompter=lambda request: Approval.DENY).cancel_prompt()  # no cancel()
+    await session.close()
+
+
+async def test_interrupt_is_a_noop_when_no_turn_runs_and_plain_cancel_is_unchanged(meeting_ws):
+    agent, _, events = make_agent(meeting_ws, [[Sleep(5), Text("never")], "after cancel"])
+    session = agent.new_session()
+    session.interrupt()  # nothing is running
+    task = asyncio.create_task(session.run("slow"))
+    await asyncio.sleep(0.05)
+    task.cancel()  # a plain cancellation, not interrupt(): stays a CancelledError
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert EventType.SESSION_CANCELLED not in [e.type for e in events]
+    session.interrupt()  # the turn is already over
+    assert (await session.run("again")).text == "after cancel"
+    await session.close()

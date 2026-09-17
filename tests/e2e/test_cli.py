@@ -165,3 +165,57 @@ def test_closed_stdout_exits_quietly(meeting_ws):
     _, err = proc.communicate(timeout=60)
     assert proc.returncode == 0, err
     assert b"Traceback" not in err and b"Broken pipe" not in err
+
+
+@pytest.mark.skipif(not hasattr(os, "openpty"), reason="pty needed")
+def test_interactive_ctrl_c_cancels_the_turn(meeting_ws):
+    """Ctrl-C while answering prints (cancelled) and returns to a usable prompt."""
+    import pty
+    import select
+    import time
+
+    script = {"turns": [[{"sleep": 30}, {"text": "never"}], "after cancel"]}
+    env = {**os.environ, "NO_COLOR": "1", "KENNEL_MOCK_SCRIPT": json.dumps(script)}
+    pid, fd = pty.fork()
+    if pid == 0:  # child
+        os.chdir(meeting_ws)
+        os.execvpe(sys.executable, [sys.executable, "-m", "kennel.cli.main", ".", "--provider", "mock"], env)
+    output = b""
+    deadline = time.time() + 60
+    asked = interrupted = asked_again = quit_sent = False
+    try:
+        while time.time() < deadline:
+            ready, _, _ = select.select([fd], [], [], 0.2)
+            if ready:
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output += chunk
+            if not asked and b"Type /help" in output:
+                os.write(fd, b"slow question\n")
+                asked = True
+            elif asked and not interrupted and b"slow question" in output:
+                time.sleep(0.5)  # let the turn reach the sleeping provider call
+                os.write(fd, b"\x03")  # Ctrl-C: SIGINT to the foreground process group
+                interrupted = True
+            elif interrupted and not asked_again and b"(cancelled)" in output:
+                os.write(fd, b"second question\n")
+                asked_again = True
+            elif asked_again and not quit_sent and b"after cancel" in output:
+                os.write(fd, b"/exit\n")
+                quit_sent = True
+            if os.waitpid(pid, os.WNOHANG)[1]:
+                break
+    finally:
+        os.close(fd)
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+    text = output.decode(errors="replace")
+    assert "(cancelled)" in text, text
+    assert "after cancel" in text, text  # the session is still usable after the interrupt
+    assert "Traceback" not in text and "never" not in text

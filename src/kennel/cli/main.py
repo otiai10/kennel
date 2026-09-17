@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .. import __version__
 from ..agent import Agent
-from ..errors import ConfigurationError, KennelError, ModelUnavailableError
+from ..errors import ConfigurationError, KennelError, ModelUnavailableError, TurnCancelledError
 from ..registry import DEFAULT_TOOLS, READ_ONLY_TOOLS
 from ..session import AgentResult, Session
 from .renderer import ConsolePrompter, Renderer
@@ -127,20 +127,13 @@ def _run_turn(loop: asyncio.AbstractEventLoop, session: Session, prompt: str, re
     if prompter is not None:
         prompter.reset()
     task = loop.create_task(session.run(prompt, on_delta=renderer.delta))
-
-    def on_sigint() -> None:
-        if prompter is not None:
-            prompter.cancel()
-        if not task.done():
-            task.cancel()
-
     try:
-        loop.add_signal_handler(signal.SIGINT, on_sigint)
+        loop.add_signal_handler(signal.SIGINT, session.interrupt)
     except (NotImplementedError, RuntimeError):  # pragma: no cover - non-main thread
         pass
     try:
         return loop.run_until_complete(task)
-    except asyncio.CancelledError:
+    except (TurnCancelledError, asyncio.CancelledError):
         renderer.note("(cancelled)")
         return None
     finally:

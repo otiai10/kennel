@@ -14,6 +14,7 @@ from .errors import (
     ToolError,
     ToolExecutionError,
     ToolOutputLimitError,
+    TurnCancelledError,
     WorkspaceError,
     WorkspaceEscapeError,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "ToolOutputLimitError",
     "ToolParameter",
     "ToolResult",
+    "TurnCancelledError",
     "Usage",
     "Workspace",
     "WorkspaceError",

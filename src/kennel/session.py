@@ -6,10 +6,10 @@ import asyncio
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from .context import HistoryTurn, compact_history, looks_like_tool_narration
-from .errors import ContextLimitError, KennelError, ProviderError
+from .errors import ContextLimitError, KennelError, ProviderError, TurnCancelledError
 from .events import EventType
 from .providers.base import ProviderSession
 from .runner import ToolCallRecord, ToolRunner
@@ -57,6 +57,9 @@ class Session:
         self._provider_session: ProviderSession | None = None
         self._started = False
         self._failed = False
+        self._task: asyncio.Task[Any] | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._interrupted = False
         self.runner = ToolRunner(
             agent.tools,
             agent.tool_context(),
@@ -114,6 +117,43 @@ class Session:
             "workspace": str(self.agent.workspace.root),
         }
 
+    def interrupt(self) -> None:
+        """Stop the turn that is running, keeping the session usable.
+
+        Safe to call from any thread or task: the cancellation is posted to the
+        loop that started the turn. The waiting ``run()`` emits
+        ``session.cancelled`` and raises
+        :class:`~kennel.errors.TurnCancelledError`; a following ``run()`` starts a
+        fresh turn on a new provider session. A no-op when no turn is running,
+        so a UI can wire it straight to a stop button.
+        """
+        task, loop = self._task, self._loop
+        if task is None or loop is None or task.done():
+            return
+        self._interrupted = True
+        self.runner.cancel_turn()
+        self.agent.permissions.cancel_prompt()  # a prompter blocked on stdin would hold the turn
+        try:
+            loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:  # pragma: no cover - the loop is already closed
+            pass
+
+    async def _abandon_turn(self, text: str) -> NoReturn:
+        """Wind down a cancelled turn, then raise what the caller should see.
+
+        Call this from an ``except asyncio.CancelledError`` handler; it always
+        raises. :meth:`interrupt` asked for the stop, so the turn becomes a
+        ``TurnCancelledError``; any other cancellation keeps asyncio's meaning and
+        the handled ``CancelledError`` is re-raised as is.
+        """
+        self.runner.cancel_turn()
+        self._emit(EventType.MODEL_COMPLETED, stop_reason="cancelled", chars=len(text))
+        await self._drop_provider()
+        if self._interrupted:
+            self._emit(EventType.SESSION_CANCELLED, turns=len(self.history))
+            raise TurnCancelledError("The turn was interrupted.") from None
+        raise
+
     # -- running --------------------------------------------------------------
 
     async def run(self, prompt: str, *, on_delta: Callable[[str], None] | None = None) -> AgentResult:
@@ -121,9 +161,15 @@ class Session:
 
         With ``on_delta`` the answer is streamed and the callback receives text
         deltas as they arrive (also emitted as ``model.delta`` events).
+
+        :meth:`interrupt` stops the turn in flight, in which case this raises
+        :class:`~kennel.errors.TurnCancelledError`.
         """
         if not prompt.strip():
             raise KennelError("Prompt must not be empty")
+        self._task = asyncio.current_task()
+        self._loop = asyncio.get_running_loop()
+        self._interrupted = False
         if not self._started:
             self._started = True
             self._emit(
@@ -156,10 +202,7 @@ class Session:
                 await self._drop_provider()
                 break
             except asyncio.CancelledError:
-                self.runner.cancel_turn()
-                self._emit(EventType.MODEL_COMPLETED, stop_reason="cancelled", chars=len(text))
-                await self._drop_provider()
-                raise
+                await self._abandon_turn(text)
             except KennelError as exc:
                 self._emit(EventType.SESSION_FAILED, error=str(exc))
                 raise
@@ -174,10 +217,7 @@ class Session:
             try:
                 text = await asyncio.wait_for(self._generate(NUDGE_PROMPT, on_delta), timeout)
             except asyncio.CancelledError:
-                self.runner.cancel_turn()
-                self._emit(EventType.MODEL_COMPLETED, stop_reason="cancelled", chars=len(text))
-                await self._drop_provider()
-                raise
+                await self._abandon_turn(text)
             except (ContextLimitError, asyncio.TimeoutError):
                 pass  # keep the narrated answer rather than fail the turn
         if stop_reason == "end_turn" and self.runner.limit_hit:
