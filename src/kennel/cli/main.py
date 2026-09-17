@@ -206,13 +206,18 @@ def run_once(agent: Agent, prompt: str, renderer: Renderer, prompter: ConsolePro
 BYPASS_WARNING = "! permission mode bypass: every tool runs without asking, including shell and web"
 
 
+def _rule_list(agent: Agent) -> str:
+    """The ``tool(specifier)=decision`` rules, as shown in the header and /status."""
+    return ", ".join(f"{rule.key}={rule.decision.value}" for rule in agent.permissions.rules(specified_only=True))
+
+
 def _header(agent: Agent) -> str:
     policy = agent.permissions.policy()
     tools = ", ".join(
         name if policy.get(name, "allow") == "allow" else f"{name} ({policy[name].value})"
         for name in agent.tools
     )
-    rules = ", ".join(f"{rule.key}={rule.decision.value}" for rule in agent.permissions.rules())
+    rules = _rule_list(agent)
     info = agent.provider.info
     lines = [
         f"Kennel v{__version__}",
@@ -275,8 +280,8 @@ def run_interactive(agent: Agent, renderer: Renderer, prompter: ConsolePrompter 
                     out.write(f"tools: {', '.join(agent.tools)}\n")
                     out.write(f"permission_mode: {agent.permission_mode.value}\n")
                     entries = [f"{k}={v.value}" for k, v in sorted(agent.permissions.policy().items()) if k in agent.tools]
-                    entries += [f"{r.key}={r.decision.value}" for r in agent.permissions.rules()]
-                    out.write("permissions: " + ", ".join(entries) + "\n")
+                    rules = _rule_list(agent)
+                    out.write("permissions: " + ", ".join(entries + ([rules] if rules else [])) + "\n")
                 elif command == "/clear":
                     loop.run_until_complete(session.clear())
                     renderer.note("(conversation cleared)")

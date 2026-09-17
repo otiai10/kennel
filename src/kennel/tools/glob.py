@@ -7,8 +7,8 @@ from typing import Any
 
 from ..errors import ToolExecutionError
 from ..permissions import PermissionKind
-from ..rules import match_path_argument
-from ._fs import iter_files, matches_glob
+from ..rules import match_path_argument, matches_glob
+from ._fs import iter_files
 from .base import Tool, ToolContext, ToolParameter, ToolResult
 
 

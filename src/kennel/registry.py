@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 
 from .errors import ConfigurationError
+from .permissions import READ_ONLY_TOOL_NAMES
 from .tools.base import Tool
 
 ToolFactory = Callable[[], Tool]
@@ -68,7 +69,7 @@ def _builtin_registry() -> ToolRegistry:
     return registry
 
 
-READ_ONLY_TOOLS: tuple[str, ...] = ("glob", "grep", "read")
+READ_ONLY_TOOLS: tuple[str, ...] = READ_ONLY_TOOL_NAMES
 MUTATION_TOOLS: tuple[str, ...] = ("write", "edit", "shell")
 DEFAULT_TOOLS: tuple[str, ...] = READ_ONLY_TOOLS + MUTATION_TOOLS
 

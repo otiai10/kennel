@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from kennel.tools._fs import matches_glob
+from kennel.rules import matches_glob
 from kennel.tools.glob import GlobTool
 
 

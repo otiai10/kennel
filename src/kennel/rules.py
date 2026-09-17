@@ -39,9 +39,14 @@ def parse_rule(key: str) -> tuple[str, str | None]:
     return match.group("name"), spec
 
 
-@lru_cache(maxsize=512)
-def glob_to_regex(pattern: str) -> re.Pattern[str]:
-    """Translate a glob with ``**`` support into a regex over POSIX relative paths."""
+@lru_cache(maxsize=1024)
+def glob_to_regex(pattern: str, cross_slash: bool = False) -> re.Pattern[str]:
+    """Translate a glob with ``**`` support into a regex over POSIX relative paths.
+
+    With ``cross_slash`` a single ``*`` and ``?`` also match ``/``, which is what
+    free-form text (a command line) and the loose path fallback want.
+    """
+    any_run, any_one = (".*", ".") if cross_slash else ("[^/]*", "[^/]")
     i, n = 0, len(pattern)
     out: list[str] = []
     while i < n:
@@ -55,9 +60,9 @@ def glob_to_regex(pattern: str) -> re.Pattern[str]:
                 out.append(".*")
                 i += 2
                 continue
-            out.append("[^/]*")
+            out.append(any_run)
         elif c == "?":
-            out.append("[^/]")
+            out.append(any_one)
         elif c == "[":
             j = pattern.find("]", i + 1)
             if j == -1:
@@ -71,7 +76,7 @@ def glob_to_regex(pattern: str) -> re.Pattern[str]:
         else:
             out.append(re.escape(c))
         i += 1
-    return re.compile("^" + "".join(out) + "$")
+    return re.compile("^" + "".join(out) + "$", re.DOTALL)
 
 
 def matches_glob(pattern: str, relative_posix: str) -> bool:
@@ -84,8 +89,7 @@ def matches_glob(pattern: str, relative_posix: str) -> bool:
     if "/" not in pattern:
         if glob_to_regex(pattern).match(relative_posix.rsplit("/", 1)[-1]):
             return True
-        loose = re.compile("^" + glob_to_regex(pattern).pattern[1:-1].replace("[^/]*", ".*").replace("[^/]", ".") + "$")
-        return loose.match(relative_posix) is not None
+        return glob_to_regex(pattern, cross_slash=True).match(relative_posix) is not None
     if pattern.startswith("./"):
         pattern = pattern[2:]
     return glob_to_regex(pattern).match(relative_posix) is not None
@@ -98,16 +102,17 @@ def matches_text(pattern: str, text: str) -> bool:
     crosses ``/`` and the whole string must match (``git *`` matches
     ``git status`` but not ``sudo git status``).
     """
-    regex = glob_to_regex(pattern).pattern.replace("[^/]", ".")
-    return re.match(regex, text, re.DOTALL) is not None
+    return glob_to_regex(pattern, cross_slash=True).match(text) is not None
 
 
 def normalize_path(value: str) -> str:
     """Workspace-relative POSIX form of a tool's ``path`` argument, for rule matching.
 
-    Only lexical: ``./docs/a.md`` and ``docs//a.md`` become ``docs/a.md``.
-    Absolute paths are left as they are (the tools resolve them through the
-    workspace; a rule written with a relative glob simply will not match).
+    Lexical only, but ``..`` is collapsed: ``docs/../src/x`` becomes ``src/x``, so
+    ``write(docs/**)`` cannot be satisfied by a path that leaves ``docs``.
+    Absolute paths and paths that climb above the root keep their prefix (the
+    tools resolve them through the workspace; a rule written with a relative
+    glob simply will not match).
     """
     path = value.strip().replace("\\", "/")
     if not path:
@@ -117,6 +122,11 @@ def normalize_path(value: str) -> str:
     for part in path.split("/"):
         if part in ("", "."):
             continue
+        if part == ".." and parts and parts[-1] != "..":
+            parts.pop()
+            continue
+        if part == ".." and absolute:
+            continue  # cannot climb above the root
         parts.append(part)
     out = "/".join(parts)
     return ("/" + out) if absolute else (out or ".")

@@ -56,18 +56,32 @@ BUILTIN_KINDS: dict[str, PermissionKind] = {
     "web": PermissionKind.WEB,
 }
 
+#: Tool names a read-only agent is limited to. ``registry.READ_ONLY_TOOLS`` is this
+#: tuple; it lives here because :class:`PermissionMode` needs it and ``registry``
+#: imports this module (not the other way round).
+READ_ONLY_TOOL_NAMES: tuple[str, ...] = ("glob", "grep", "read")
+
 _A, _Q, _D = Decision.ALLOW, Decision.ASK, Decision.DENY
 
-_MODE_KIND_DEFAULTS: dict[str, dict[PermissionKind, Decision]] = {
-    # read: write: shell: web:
-    "read-only": {PermissionKind.READ: _A, PermissionKind.WRITE: _D, PermissionKind.SHELL: _D, PermissionKind.WEB: _D},
-    "default": {PermissionKind.READ: _A, PermissionKind.WRITE: _Q, PermissionKind.SHELL: _Q, PermissionKind.WEB: _D},
-    "accept-edits": {PermissionKind.READ: _A, PermissionKind.WRITE: _A, PermissionKind.SHELL: _Q, PermissionKind.WEB: _Q},
-    "dont-ask": {PermissionKind.READ: _A, PermissionKind.WRITE: _D, PermissionKind.SHELL: _D, PermissionKind.WEB: _D},
-    "bypass": {PermissionKind.READ: _A, PermissionKind.WRITE: _A, PermissionKind.SHELL: _A, PermissionKind.WEB: _A},
+_DEFAULT_KIND_DEFAULTS: dict[PermissionKind, Decision] = {
+    PermissionKind.READ: _A,
+    PermissionKind.WRITE: _Q,
+    PermissionKind.SHELL: _Q,
+    PermissionKind.WEB: _D,
 }
 
-_READ_ONLY_TOOL_NAMES: tuple[str, ...] = ("glob", "grep", "read")
+#: ``dont-ask`` and ``read-only`` are ``default`` with every ``ask`` turned into ``deny``.
+_NO_ASK_KIND_DEFAULTS: dict[PermissionKind, Decision] = {
+    kind: (_D if decision is _Q else decision) for kind, decision in _DEFAULT_KIND_DEFAULTS.items()
+}
+
+_MODE_KIND_DEFAULTS: dict[str, dict[PermissionKind, Decision]] = {
+    "read-only": _NO_ASK_KIND_DEFAULTS,
+    "default": _DEFAULT_KIND_DEFAULTS,
+    "accept-edits": {**_DEFAULT_KIND_DEFAULTS, PermissionKind.WRITE: _A, PermissionKind.WEB: _Q},
+    "dont-ask": _NO_ASK_KIND_DEFAULTS,
+    "bypass": dict.fromkeys(_DEFAULT_KIND_DEFAULTS, _A),
+}
 
 
 class PermissionMode(str, Enum):
@@ -98,7 +112,7 @@ class PermissionMode(str, Enum):
 
     def tools(self) -> tuple[str, ...] | None:
         """Tool names this mode restricts the agent to, or ``None`` for no restriction."""
-        return _READ_ONLY_TOOL_NAMES if self is PermissionMode.READ_ONLY else None
+        return READ_ONLY_TOOL_NAMES if self is PermissionMode.READ_ONLY else None
 
     def kind_defaults(self) -> dict[PermissionKind, Decision]:
         """Default decision per permission kind, used for tools the policy does not name."""
@@ -111,7 +125,6 @@ class PermissionMode(str, Enum):
 
 
 DEFAULT_MODE = PermissionMode.DEFAULT
-DEFAULT_POLICY: dict[str, Decision] = DEFAULT_MODE.policy()
 
 
 @dataclass(frozen=True)
@@ -145,31 +158,28 @@ Prompter = Callable[[PermissionRequest], Approval]
 RuleMatcher = Callable[[str, Mapping[str, Any]], bool]
 
 
-def parse_policy(values: Mapping[str, Decision | str] | None) -> dict[str, Decision]:
-    """Validate a policy mapping, keeping the original rule keys.
+def parse_rules(values: Mapping[str, Decision | str] | None) -> list[PermissionRule]:
+    """Parse and validate a policy mapping into rules, preserving order.
 
     Both sides are checked: the key must be ``tool`` or ``tool(specifier)`` and
     the value must be a :class:`Decision`.
     """
-    policy: dict[str, Decision] = {}
-    for name, value in (values or {}).items():
-        parse_rule(name)  # raises ConfigurationError on a malformed rule
+    rules: list[PermissionRule] = []
+    for key, value in (values or {}).items():
+        tool_name, specifier = parse_rule(key)
         try:
-            policy[name] = value if isinstance(value, Decision) else Decision(str(value).lower())
+            decision = value if isinstance(value, Decision) else Decision(str(value).lower())
         except ValueError as exc:
             raise ConfigurationError(
-                f"Invalid permission {value!r} for rule {name!r}; expected allow, ask or deny"
+                f"Invalid permission {value!r} for rule {key!r}; expected allow, ask or deny"
             ) from exc
-    return policy
-
-
-def parse_rules(values: Mapping[str, Decision | str] | None) -> list[PermissionRule]:
-    """Parse a policy mapping into rules, preserving order."""
-    rules: list[PermissionRule] = []
-    for key, decision in parse_policy(values).items():
-        tool_name, specifier = parse_rule(key)
         rules.append(PermissionRule(tool_name, specifier, decision))
     return rules
+
+
+def parse_policy(values: Mapping[str, Decision | str] | None) -> dict[str, Decision]:
+    """Validate a policy mapping and return it keyed by canonical rule key."""
+    return {rule.key: rule.decision for rule in parse_rules(values)}
 
 
 class PermissionManager:
@@ -185,8 +195,9 @@ class PermissionManager:
         self.mode = PermissionMode.parse(mode)
         self._defaults = self.mode.policy()
         self._kind_defaults = self.mode.kind_defaults()
-        self._policy: dict[str, Decision] = {}
-        self._rules: list[PermissionRule] = []
+        # One ordered rule list per tool, bare rules included (specifier None), so
+        # resolving a call is a single dict lookup on the tool call hot path.
+        self._rules: dict[str, list[PermissionRule]] = {}
         self._prompter = prompter
         self._session_grants: set[str] = set()
         self._lock = threading.Lock()
@@ -198,22 +209,25 @@ class PermissionManager:
 
     def policy(self) -> dict[str, Decision]:
         """Effective decision per tool name, ignoring specifier rules (for display)."""
-        with self._lock:
-            return {**self._defaults, **self._policy}
+        bare = {r.tool_name: r.decision for r in self.rules() if r.specifier is None}
+        return {**self._defaults, **bare}
 
-    def rules(self) -> list[PermissionRule]:
-        """Specifier rules in declaration order."""
+    def rules(self, *, specified_only: bool = False) -> list[PermissionRule]:
+        """Declared rules, grouped per tool in declaration order."""
         with self._lock:
-            return list(self._rules)
+            return [
+                rule
+                for rules in self._rules.values()
+                for rule in rules
+                if not (specified_only and rule.specifier is None)
+            ]
 
     def update(self, policy: Mapping[str, Decision | str] | None) -> None:
         """Layer more rules on top of the current policy (later wins)."""
         for rule in parse_rules(policy):
             with self._lock:
-                if rule.specifier is None:
-                    self._policy[rule.tool_name] = rule.decision
-                else:
-                    self._rules = [r for r in self._rules if r.key != rule.key] + [rule]
+                kept = [r for r in self._rules.get(rule.tool_name, ()) if r.key != rule.key]
+                self._rules[rule.tool_name] = kept + [rule]
 
     def decision_for(
         self,
@@ -230,15 +244,16 @@ class PermissionManager:
         for ``kind`` applies.
         """
         with self._lock:
-            bare = self._policy.get(tool_name)
-            candidates = [r for r in self._rules if r.tool_name == tool_name]
+            candidates = list(self._rules.get(tool_name, ()))
             kind_default = self._kind_defaults[kind]
+        bare: Decision | None = None
         matched: set[Decision] = set()
-        if candidates and arguments is not None:
-            match = matcher or match_arguments
-            for rule in candidates:
-                if rule.specifier is not None and match(rule.specifier, arguments):
-                    matched.add(rule.decision)
+        match = matcher or match_arguments
+        for rule in candidates:
+            if rule.specifier is None:
+                bare = rule.decision
+            elif arguments is not None and match(rule.specifier, arguments):
+                matched.add(rule.decision)
         if Decision.DENY in matched or bare is Decision.DENY:
             return Decision.DENY
         if matched:
@@ -256,9 +271,20 @@ class PermissionManager:
         with self._lock:
             return tool_name in self._session_grants
 
-    def check(self, request: PermissionRequest, *, matcher: RuleMatcher | None = None) -> bool:
-        """Return True if the call may proceed, prompting if the policy says ``ask``."""
-        decision = self.decision_for(request.tool_name, request.kind, request.arguments, matcher)
+    def check(
+        self,
+        request: PermissionRequest,
+        *,
+        matcher: RuleMatcher | None = None,
+        decision: Decision | None = None,
+    ) -> bool:
+        """Return True if the call may proceed, prompting if the policy says ``ask``.
+
+        A caller that already resolved the decision (the tool runner does, to
+        decide whether to ask at all) passes it in so rules are matched once.
+        """
+        if decision is None:
+            decision = self.decision_for(request.tool_name, request.kind, request.arguments, matcher)
         if decision is Decision.ALLOW:
             return True
         if decision is Decision.DENY:

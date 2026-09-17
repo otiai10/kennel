@@ -16,8 +16,9 @@ from kennel import (
 )
 from kennel.cli.main import BYPASS_WARNING, _header, build_agent, build_parser, resolve_mode
 from kennel.errors import ConfigurationError
+from kennel.permissions import BUILTIN_KINDS, READ_ONLY_TOOL_NAMES
 from kennel.providers.mock import Text, ToolCall
-from kennel.registry import builtin_registry
+from kennel.registry import READ_ONLY_TOOLS, builtin_registry
 from kennel.rules import matches_text, normalize_path, parse_rule
 
 SHELL = builtin_registry().create("shell")
@@ -82,6 +83,13 @@ def test_write_specifier_matches_the_path():
     assert decide(policy, WRITE, {"path": "src/a.py", "content": ""}) is Decision.ASK
 
 
+def test_a_path_rule_cannot_be_escaped_with_dotdot():
+    """write(docs/**) must not cover a path that leaves docs again."""
+    policy = {"write": "ask", "write(docs/**)": "allow"}
+    assert decide(policy, WRITE, {"path": "docs/../src/evil.py", "content": ""}) is Decision.ASK
+    assert decide(policy, WRITE, {"path": "docs/a/../b.md", "content": ""}) is Decision.ALLOW
+
+
 def test_read_deny_rule_beats_the_read_default():
     assert decide({"read(**/.env)": "deny"}, READ, {"path": ".env"}) is Decision.DENY
     assert decide({"read(**/.env)": "deny"}, READ, {"path": "conf/.env"}) is Decision.DENY
@@ -138,9 +146,17 @@ def test_last_rule_with_the_same_key_wins():
 
 
 def test_specifier_rules_do_not_leak_into_the_displayed_policy():
-    pm = PermissionManager({"shell(git *)": "allow"})
-    assert pm.policy()["shell"] is Decision.ASK
-    assert [(r.key, r.decision) for r in pm.rules()] == [("shell(git *)", Decision.ALLOW)]
+    pm = PermissionManager({"shell": "deny", "shell(git *)": "allow"})
+    assert pm.policy()["shell"] is Decision.DENY
+    assert [(r.key, r.decision) for r in pm.rules(specified_only=True)] == [("shell(git *)", Decision.ALLOW)]
+    assert [r.key for r in pm.rules()] == ["shell", "shell(git *)"]
+
+
+def test_builtin_kinds_match_the_registered_tools():
+    """The name -> kind table used for display must not drift from the tools themselves."""
+    registry = builtin_registry()
+    assert {name: registry.create(name).permission for name in registry.names()} == BUILTIN_KINDS
+    assert READ_ONLY_TOOL_NAMES == READ_ONLY_TOOLS
 
 
 # -- modes -----------------------------------------------------------------
