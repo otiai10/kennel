@@ -81,7 +81,7 @@ wheels = [
 
 [[package]]
 name = "kennel"
-version = "0.0.2"
+version = "0.0.3"
 source = { editable = "." }
 dependencies = [
     { name = "apple-fm-sdk" },

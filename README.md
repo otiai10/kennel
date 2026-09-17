@@ -9,7 +9,7 @@ event stream, and a CLI. Everything runs on your Mac; nothing leaves it by defau
 ```text
 $ kennel ~/meetings
 
-Kennel v0.0.2
+Kennel v0.0.3
 workspace: /Users/me/meetings
 model: Apple SystemLanguageModel
 mode: local
@@ -53,7 +53,7 @@ To try it without installing:
 uvx --from "git+https://github.com/otiai10/kennel" kennel --help
 ```
 
-Plain pip into an existing environment works too. Pin a tag or branch with `@v0.0.2` at the end of the URL.
+Plain pip into an existing environment works too. Pin a tag or branch with `@v0.0.3` at the end of the URL.
 
 ```bash
 pip install "git+https://github.com/otiai10/kennel"
@@ -273,6 +273,6 @@ spikes/                               Phase 0 SDK experiments (not production co
 
 ## Status
 
-v0.0.2. Read-only agent, permission-gated mutation tools, CLI, MockProvider-based test
+v0.0.3. Read-only agent, permission-gated mutation tools, CLI, MockProvider-based test
 suite, structured meeting summary example. Not yet: web search provider, persistent
 sessions, alternative models, MCP, subagents, sandboxed shell.
