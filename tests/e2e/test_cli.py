@@ -68,6 +68,11 @@ def test_allow_write_flag_writes(meeting_ws):
     assert (meeting_ws / "minutes" / "2026-09-16.md").read_text() == "# Minutes\n"
 
 
+def test_instructions_missing_file_exits_2(meeting_ws):
+    p = run_cli(["-p", "x", "--instructions", "@nope.md"], meeting_ws)
+    assert p.returncode == 2 and "--instructions" in p.stderr and "nope.md" in p.stderr
+
+
 def test_conflicting_flags(meeting_ws):
     p = run_cli(["-p", "x", "--read-only", "--allow-write"], meeting_ws)
     assert p.returncode == 2 and "cannot be combined" in p.stderr

@@ -10,7 +10,8 @@ permission rules approved from the prompt) with the standard library alone::
         "turn_timeout_seconds": 300,
         "nudge_narration": true,
         "tools": ["glob", "grep", "read"],
-        "instructions": "Answer in Japanese."
+        "instructions": "Answer in Japanese.",
+        "system_prompt": "You are a release-notes assistant."
       },
       "permissions": { "write": "ask", "shell": "deny" },
       "tools": {
@@ -53,6 +54,7 @@ class KennelConfig:
     permissions: dict[str, str] = field(default_factory=dict)
     tools: list[str] | None = None
     instructions: str | None = None
+    system_prompt: str | None = None
     sources: list[str] = field(default_factory=list)
 
     def limits(self) -> ToolLimits:
@@ -124,6 +126,10 @@ def apply_config(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>"
         if not isinstance(agent["instructions"], str):
             raise ConfigurationError(f"{source}: agent.instructions must be a string")
         cfg.instructions = agent["instructions"]
+    if "system_prompt" in agent:
+        if not isinstance(agent["system_prompt"], str):
+            raise ConfigurationError(f"{source}: agent.system_prompt must be a string")
+        cfg.system_prompt = agent["system_prompt"]
     perms = data.get("permissions", {})
     if not isinstance(perms, dict):
         raise ConfigurationError(f"{source}: 'permissions' must be an object")

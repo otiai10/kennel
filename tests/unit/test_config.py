@@ -32,6 +32,16 @@ def test_precedence_user_then_project_then_overrides(tmp_path: Path):
     assert merged.instructions == "Be brief." and cfg.max_tool_calls == 9  # original untouched
 
 
+def test_system_prompt_precedence(tmp_path: Path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "kennel.json").write_text(json.dumps({"agent": {"system_prompt": "project prompt"}}))
+    cfg = load_config(ws, user_config=None)
+    assert cfg.system_prompt == "project prompt"
+    merged = cfg.merged(system_prompt="cli prompt")  # CLI flag beats project config
+    assert merged.system_prompt == "cli prompt" and cfg.system_prompt == "project prompt"  # original untouched
+
+
 def test_missing_files_are_fine(tmp_path: Path):
     cfg = load_config(tmp_path, user_config=tmp_path / "nope.json")
     assert cfg == KennelConfig()
@@ -47,6 +57,7 @@ def test_missing_files_are_fine(tmp_path: Path):
         {"permissions": {"write": "sometimes"}},
         {"tools": {"read": {"max_lines": True}}},
         {"agent": {"nudge_narration": "yes"}},
+        {"agent": {"system_prompt": 123}},
         {"agent": []},
     ],
 )

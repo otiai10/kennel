@@ -50,6 +50,8 @@ class Agent:
         permissions: Mapping[str, Decision | str] | None = None,
         provider: ModelProvider | None = None,
         instructions: str | None = None,
+        system_prompt: str | None = None,
+        include_workspace_overview: bool = True,
         config: KennelConfig | None = None,
         prompter: Prompter | None = None,
         events: EventBus | None = None,
@@ -67,10 +69,18 @@ class Agent:
         self.provider: ModelProvider = provider if provider is not None else _default_provider()
         self.events = events if events is not None else EventBus()
         self.environment: dict[str, str] = dict(environment or {})
+        # Precedence for the replacing base (CLI > Agent() argument > project config > user config),
+        # matching config.py's documented precedence: config already reflects CLI/project/user layers,
+        # so it wins over the raw constructor argument only when explicitly set.
+        self.system_prompt: str | None = self.config.system_prompt if self.config.system_prompt is not None else system_prompt
+        self.include_workspace_overview = include_workspace_overview
         self.instructions = self._build_instructions(instructions)
 
     def _build_instructions(self, extra: str | None) -> str:
-        parts = [DEFAULT_INSTRUCTIONS, f"Workspace root: {self.workspace.root}\n{workspace_overview(self.workspace)}"]
+        base = self.system_prompt if self.system_prompt is not None else DEFAULT_INSTRUCTIONS
+        parts = [base]
+        if self.include_workspace_overview:
+            parts.append(f"Workspace root: {self.workspace.root}\n{workspace_overview(self.workspace)}")
         if self.config.instructions:
             parts.append(self.config.instructions.strip())
         if extra:
