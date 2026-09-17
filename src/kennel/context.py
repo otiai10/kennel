@@ -1,0 +1,113 @@
+"""Context management helpers: output bounding, chunking, map/reduce, compaction.
+
+On-device models have small context windows, so Kennel never assumes a whole
+document fits. Long inputs go through ``chunk_text`` and ``map_reduce``;
+conversation history is compacted with ``compact_history`` when the provider
+reports a context overflow.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .providers.base import ProviderSession
+
+
+def truncate_text(text: str, max_bytes: int, marker: str = "\n... [output truncated]") -> tuple[str, bool]:
+    data = text.encode("utf-8")
+    if len(data) <= max_bytes:
+        return text, False
+    cut = data[: max(0, max_bytes - len(marker.encode()))].decode("utf-8", errors="ignore")
+    return cut + marker, True
+
+
+def chunk_text(text: str, max_chars: int = 6000, overlap: int = 200) -> list[str]:
+    """Split text into chunks of at most ``max_chars`` on paragraph/line boundaries.
+
+    Consecutive chunks overlap by roughly ``overlap`` characters so sentences cut
+    at a boundary are still seen whole in one of them.
+    """
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive")
+    overlap = max(0, min(overlap, max_chars // 2))
+    if len(text) <= max_chars:
+        return [text] if text else []
+    units: list[str] = []
+    for para in text.split("\n\n"):
+        if len(para) + 2 <= max_chars:
+            units.append(para + "\n\n")
+        else:
+            for line in para.splitlines(keepends=True):
+                while len(line) > max_chars:
+                    units.append(line[:max_chars])
+                    line = line[max_chars:]
+                units.append(line)
+            units.append("\n")
+    chunks: list[str] = []
+    current = ""
+    for unit in units:
+        if len(current) + len(unit) > max_chars and current:
+            chunks.append(current)
+            current = current[-overlap:] if overlap else ""
+        current += unit
+    if current.strip():
+        chunks.append(current)
+    return [c.strip("\n") for c in chunks if c.strip()]
+
+
+@dataclass
+class HistoryTurn:
+    prompt: str
+    response: str
+
+
+def compact_history(turns: Sequence[HistoryTurn], max_chars: int = 2000, per_item: int = 300) -> str:
+    """Compress prior turns into a short text block for a fresh model session."""
+    if not turns:
+        return ""
+    lines = ["Summary of the conversation so far (older context was compacted):"]
+    for turn in turns:
+        lines.append(f"- User asked: {_squash(turn.prompt, per_item)}")
+        if turn.response:
+            lines.append(f"  Assistant answered: {_squash(turn.response, per_item)}")
+    text = "\n".join(lines)
+    suffix = "\n... (truncated)"
+    if len(text) > max_chars:
+        text = text[: max_chars - len(suffix)].rstrip() + suffix
+    return text
+
+
+def _squash(text: str, limit: int) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 3] + "..."
+
+
+async def map_reduce(
+    open_session: Callable[[], Awaitable[ProviderSession]],
+    chunks: Sequence[str],
+    *,
+    map_prompt: Callable[[int, int, str], str],
+    reduce_prompt: Callable[[Sequence[str]], str],
+) -> str:
+    """Summarize each chunk in its own fresh session, then reduce the partials.
+
+    ``open_session`` must return a *new* provider session each time so that no
+    chunk inherits another chunk's context.
+    """
+    partials: list[str] = []
+    for index, chunk in enumerate(chunks, 1):
+        session = await open_session()
+        try:
+            partials.append(await session.respond(map_prompt(index, len(chunks), chunk)))
+        finally:
+            await session.close()
+    if len(partials) == 1:
+        return partials[0]
+    session = await open_session()
+    try:
+        return await session.respond(reduce_prompt(partials))
+    finally:
+        await session.close()
