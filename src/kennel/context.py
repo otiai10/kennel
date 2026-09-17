@@ -8,12 +8,51 @@ reports a context overflow.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+import re
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .providers.base import ProviderSession
+
+
+_NARRATION_PHRASES = re.compile(
+    # announcing steps instead of taking them
+    r"(実行します|検索します|探します|読み込みます|確認します|行います|させてください|してみます|しましょう|以下のコマンド|次のコマンド|"
+    r"確認する必要があります|探す必要があります|まとめる必要があります|"
+    r"\bI(?:'ll| will) (?:run|search|use|call|look|check|read|execute|find)\b|"
+    r"\bLet me (?:run|search|check|read|look|find)\b|\bI am going to (?:run|search|use|call)\b|"
+    r"\bI (?:would|can) (?:run|search|use|check|look)\b|"
+    # asking which file to look at, or for permission to look, instead of looking
+    r"どのファイル|確認できますか|確認すればよい|確認してもよろしい|探してもよろしい|探してみましょうか|確認しましょうか|"
+    r"\bwhich files? (?:should|would|do)\b|\bshould I (?:search|look|check|read|find|open)\b|"
+    r"\b(?:would|do) you (?:like|want) me to (?:search|look|check|read|find|open)\b|"
+    r"\bcan I (?:search|check|look|read)\b)",
+    re.IGNORECASE,
+)
+
+
+def looks_like_tool_narration(text: str, tool_names: Iterable[str]) -> bool:
+    """True if an answer describes tool steps instead of taking them.
+
+    Used only for turns in which no tool was actually called. Matches a fenced
+    code block, a mention of an available tool by name, an "I will run ..."
+    announcement, or a "which file should I check?" question, in English or
+    Japanese. An agent with file tools should look rather than ask.
+    """
+    if not text.strip():
+        return False
+    if "```" in text:
+        return True
+    # Talking about files without having looked at any is narration or a clarifying
+    # question an agent with file tools should answer by looking.
+    if "ファイル" in text or re.search(r"\bfiles?\b", text, re.IGNORECASE):
+        return True
+    lowered = text.lower()
+    if any(re.search(rf"\b{re.escape(name)}\b", lowered) for name in tool_names):
+        return True
+    return _NARRATION_PHRASES.search(text) is not None
 
 
 def truncate_text(text: str, max_bytes: int, marker: str = "\n... [output truncated]") -> tuple[str, bool]:

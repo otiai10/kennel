@@ -5,6 +5,7 @@ Config files are TOML::
     [agent]
     max_tool_calls = 32
     turn_timeout_seconds = 300
+    nudge_narration = true   # re-prompt once when the model describes tool steps instead of taking them
     tools = ["glob", "grep", "read"]
     instructions = "Answer in Japanese."
 
@@ -59,6 +60,7 @@ class KennelConfig:
     glob_max_results: int = 500
     grep_max_results: int = 100
     shell_timeout_seconds: int = 30
+    nudge_narration: bool = True
     permissions: dict[str, str] = field(default_factory=dict)
     tools: list[str] | None = None
     instructions: str | None = None
@@ -118,6 +120,10 @@ def apply_toml(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>") 
         if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0):
             raise ConfigurationError(f"{source}: [agent] turn_timeout_seconds must be a positive number")
         cfg.turn_timeout_seconds = float(value) if value is not None else None
+    if "nudge_narration" in agent:
+        if not isinstance(agent["nudge_narration"], bool):
+            raise ConfigurationError(f"{source}: [agent] nudge_narration must be true or false")
+        cfg.nudge_narration = agent["nudge_narration"]
     if "tools" in agent:
         value = agent["tools"]
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):

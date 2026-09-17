@@ -186,6 +186,12 @@ from kennel.providers.apple import AppleProvider
 agent = Agent(".", provider=AppleProvider(deterministic=True))
 ```
 
+**Narration guard.** Small models sometimes describe the tool steps they would take
+("I'll run grep for that", "which file should I check?") instead of taking them. When a
+turn ends with no tool call and the answer looks like that, Kennel re-prompts once inside
+the same session to carry the steps out; the CLI shows `↻ carrying out the described
+steps`. Set `nudge_narration = false` under `[agent]` in `kennel.toml` to turn it off.
+
 Structured output for application use goes through `ProviderSession.respond_structured`
 (Apple guided generation). `examples/meeting_summary.py` shows the reference workflow:
 chunk a transcript, extract a `MeetingSummary` per chunk, reduce. Owners and due dates
@@ -199,6 +205,7 @@ Precedence: CLI flags > `Agent(...)` arguments > `./kennel.toml` > `~/.config/ke
 [agent]
 max_tool_calls = 32
 turn_timeout_seconds = 300
+nudge_narration = true
 instructions = "Answer in Japanese."
 
 [permissions]

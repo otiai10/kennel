@@ -72,6 +72,8 @@ class Renderer:
             self._line(s.red(f"  ✗ {d.get('error', 'failed')}"))
         elif t == EventType.PERMISSION_DENIED:
             self._line(s.yellow(f"  ⊘ denied: {d.get('summary', '')}"))
+        elif t == EventType.MODEL_NUDGED:
+            self._line(s.dim("  ↻ carrying out the described steps instead of narrating them"))
         elif t == EventType.CONTEXT_COMPACTED:
             self._line(s.dim("  ↻ context compacted, retrying"))
 

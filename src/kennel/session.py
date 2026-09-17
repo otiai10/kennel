@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from .context import HistoryTurn, compact_history
+from .context import HistoryTurn, compact_history, looks_like_tool_narration
 from .errors import ContextLimitError, KennelError, ProviderError
 from .events import EventType
 from .providers.base import ProviderSession
@@ -39,6 +39,13 @@ class Turn:
     response: str
     stop_reason: str
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
+
+
+NUDGE_PROMPT = (
+    "Do not describe, propose or ask about the steps; carry them out now by calling the tools "
+    "(start with glob), then give the answer in the language of my previous message. "
+    "Do not ask for confirmation or which file to check."
+)
 
 
 class Session:
@@ -159,12 +166,31 @@ class Session:
             except Exception as exc:  # noqa: BLE001 - provider bug surfaced as a KennelError
                 self._emit(EventType.SESSION_FAILED, error=str(exc))
                 raise ProviderError(f"The model request failed: {exc}") from exc
+        if stop_reason == "end_turn" and self._should_nudge(text):
+            # The model narrated tool steps instead of taking them: continue once.
+            self._emit(EventType.MODEL_NUDGED, chars=len(text))
+            try:
+                text = await asyncio.wait_for(self._generate(NUDGE_PROMPT, on_delta), timeout)
+            except asyncio.CancelledError:
+                self.runner.cancel_turn()
+                self._emit(EventType.MODEL_COMPLETED, stop_reason="cancelled", chars=len(text))
+                await self._drop_provider()
+                raise
+            except (ContextLimitError, asyncio.TimeoutError):
+                pass  # keep the narrated answer rather than fail the turn
         if stop_reason == "end_turn" and self.runner.limit_hit:
             stop_reason = "tool_limit"
         records = self.runner.turn_records()
         self.history.append(Turn(prompt, text, stop_reason, records))
         self._emit(EventType.MODEL_COMPLETED, stop_reason=stop_reason, chars=len(text), tool_calls=len(records))
         return AgentResult(text=text, stop_reason=stop_reason, tool_calls=records, usage=None, session_id=self.id)
+
+    def _should_nudge(self, text: str) -> bool:
+        if not self.agent.tools or not self.agent.config.nudge_narration:
+            return False
+        if self.runner.turn_records():
+            return False
+        return looks_like_tool_narration(text, self.agent.tools)
 
     async def _generate(self, prompt: str, on_delta: Callable[[str], None] | None) -> str:
         provider = await self._provider(self._compaction_note())

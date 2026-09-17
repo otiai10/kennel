@@ -276,3 +276,38 @@ async def test_runner_cancel_turn_suppresses_events(meeting_ws):
     runner.begin_turn()
     await runner.invoke("glob", {"pattern": "*.md"})
     assert [e.type for e in events] == [EventType.TOOL_REQUESTED, EventType.TOOL_STARTED, EventType.TOOL_COMPLETED]
+
+
+NARRATION = "田中さんのメールを探すために、以下のコマンドを実行します。\n\n```bash\ngrep -r 田中 *.txt\n```\n\nこのコマンドを実行します。"
+
+
+async def test_narration_is_nudged_once(meeting_ws):
+    agent, provider, events = make_agent(meeting_ws, [NARRATION, [ToolCall("glob", {"pattern": "*.txt"}), Text("found it")]])
+    deltas = []
+    result = await agent.run("メールを放置している気がする", on_delta=deltas.append)
+    assert result.text == "found it" and [c.name for c in result.tool_calls] == ["glob"]
+    session = provider.sessions[0]
+    assert len(provider.sessions) == 1 and session.prompts[1].startswith("Do not describe")
+    types = [e.type for e in events]
+    assert types.index(EventType.MODEL_NUDGED) < types.index(EventType.TOOL_STARTED)
+    assert "found it" in "".join(deltas)
+
+
+async def test_nudge_only_once_and_not_for_plain_answers(meeting_ws):
+    agent, provider, events = make_agent(meeting_ws, [NARRATION, "I will search the files for you."])
+    result = await agent.run("x")
+    assert result.text == "I will search the files for you." and len(provider.sessions[0].prompts) == 2
+    agent, provider, events = make_agent(meeting_ws, ["The decision was to ship on Friday."])
+    result = await agent.run("x")
+    assert len(provider.sessions[0].prompts) == 1 and EventType.MODEL_NUDGED not in [e.type for e in events]
+    # a turn that already used tools is never nudged, even if the text mentions a tool
+    agent, provider, _ = make_agent(meeting_ws, [[ToolCall("glob", {"pattern": "*.md"}), Text("I used glob to find notes/todo.md")]])
+    await agent.run("x")
+    assert len(provider.sessions[0].prompts) == 1
+
+
+async def test_nudge_disabled_by_config_or_without_tools(meeting_ws):
+    agent, provider, _ = make_agent(meeting_ws, [NARRATION], config=KennelConfig(nudge_narration=False))
+    assert (await agent.run("x")).text == NARRATION and len(provider.sessions[0].prompts) == 1
+    agent, provider, _ = make_agent(meeting_ws, [NARRATION], tools=[])
+    assert (await agent.run("x")).text == NARRATION and len(provider.sessions[0].prompts) == 1

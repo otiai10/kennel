@@ -71,3 +71,24 @@ async def test_map_reduce_uses_fresh_sessions():
     assert len(opened) == 3 and all(s.closed for s in opened)
     single = await map_reduce(open_session, ["only"], map_prompt=lambda i, n, c: c, reduce_prompt=lambda p: "never")
     assert single == "R(only)"
+
+
+def test_looks_like_tool_narration():
+    from kennel.context import looks_like_tool_narration
+
+    tools = ["glob", "grep", "read"]
+    assert looks_like_tool_narration("以下のコマンドを実行します。\n```bash\ngrep x\n```", tools)
+    assert looks_like_tool_narration("まず田中さんのメールを検索します。", tools)
+    assert looks_like_tool_narration("I'll run grep for the term first.", tools)
+    assert looks_like_tool_narration("Let me search the workspace.", tools)
+    assert looks_like_tool_narration("I would use the read tool on that file.", tools)
+    assert looks_like_tool_narration("Bobからの依頼について、どのファイルを確認すればよいでしょうか？", tools)
+    assert looks_like_tool_narration("まず、特定のファイルを探して確認できますか？", tools)
+    assert looks_like_tool_narration("Which file should I check?", tools)
+    assert looks_like_tool_narration("該当するファイルを特定するために、ファイル検索を行います。", tools)
+    assert looks_like_tool_narration("該当するファイルを探して読み取らせてください。", tools)
+    assert looks_like_tool_narration("Bob asked for CI config; the file notes/todo.md has more.", tools)
+    assert looks_like_tool_narration("Would you like me to search the transcripts?", tools)
+    assert not looks_like_tool_narration("The decision was to ship v0.1 on Friday.", tools)
+    assert not looks_like_tool_narration("確認しました。決定事項は以下です。", tools)
+    assert not looks_like_tool_narration("", tools)

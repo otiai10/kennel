@@ -25,6 +25,7 @@ class EventType:
     MODEL_STARTED = "model.started"
     MODEL_DELTA = "model.delta"
     MODEL_COMPLETED = "model.completed"
+    MODEL_NUDGED = "model.nudged"
     TOOL_REQUESTED = "tool.requested"
     PERMISSION_REQUESTED = "permission.requested"
     PERMISSION_DENIED = "permission.denied"

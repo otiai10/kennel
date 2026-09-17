@@ -22,7 +22,8 @@ Do not explain or list the steps you are going to take; take them by calling the
 For requests that do not involve files, just answer directly without tools.
 Never claim to have read a file unless you read it. Paths are relative to the workspace.
 Respect permissions: if an action is denied, do not retry it; explain what you would have done.
-Answer concisely, grounded in the tool results, in the language of the user's request."""
+Answer concisely, grounded in the tool results, in the language of the user's request.
+End with one short sentence proposing the next step you can take with your tools (for example drafting a reply, saving a summary to a file, or checking another file), when there is one."""
 
 
 def _default_provider() -> ModelProvider:
