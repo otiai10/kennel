@@ -39,7 +39,8 @@ async def test_before_tool_deny_blocks_the_call(meeting_ws):
     def guard(call, ctx):
         assert call.name == "glob" and call.arguments == {"pattern": "*.md"}
         assert ctx.session_id and ctx.workspace.root == meeting_ws.resolve()
-        assert ctx.tool.name == "glob"
+        assert ctx.permissions is agent.permissions and ctx.environment == {}
+        assert ctx.tool.name == "glob" and ctx.tool_context.limits.max_output_bytes > 0
         return Deny("no")
 
     agent, provider, events = make_agent(meeting_ws, [GLOB], hooks=Hooks(before_tool=[guard]))
@@ -94,6 +95,8 @@ async def test_before_tool_allow_can_remember_the_session(meeting_ws):
     result = await agent.run("go")
     assert [c.status for c in result.tool_calls] == ["ok", "ok"]  # no prompter, but the grant stands
     assert calls == ["write", "write"]
+    # The grant went through PermissionManager, the same path a prompter answer takes.
+    assert agent.permissions.has_session_grant("write")
 
 
 async def test_before_tool_hooks_run_in_order_and_first_deny_wins(meeting_ws):

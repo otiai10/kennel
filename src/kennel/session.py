@@ -194,6 +194,8 @@ class Session:
 
     async def _apply_before_prompt(self, prompt: str) -> str:
         """Append whatever the ``before_prompt`` hooks add to the prompt (additional context)."""
+        if not self.agent.hooks.before_prompt:
+            return prompt
         extra: list[str] = []
         for hook in list(self.agent.hooks.before_prompt):
             added = await run_hook(hook, prompt, self)

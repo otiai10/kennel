@@ -28,8 +28,8 @@ from typing import Any
 from .context import truncate_text
 from .errors import KennelError, ToolArgumentError
 from .events import EventBus, EventType
-from .hooks import Deny, HookContext, Hooks, ToolCallRequest, run_hook, select_hooks
-from .permissions import Allow, Decision, PermissionRequest
+from .hooks import HookContext, Hooks, ToolCallRequest, run_hook, select_hooks
+from .permissions import Decision, PermissionOutcome, PermissionRequest
 from .tools.base import Tool, ToolContext, ToolResult
 
 log = logging.getLogger(__name__)
@@ -118,9 +118,7 @@ class ToolRunner:
         try:
             args = tool.validate(arguments)
         except ToolArgumentError as exc:
-            self._record(ToolCallRecord(name, dict(arguments), summary, "invalid", error=str(exc)))
-            self._emit(EventType.TOOL_FAILED, tool=name, summary=summary, error=str(exc))
-            return f"Error: {exc}"
+            return self._invalid(name, dict(arguments), summary, exc)
         summary = tool.summarize(args)
 
         with self._lock:
@@ -142,24 +140,23 @@ class ToolRunner:
             self._emit(EventType.TOOL_FAILED, tool=name, summary=summary, error=msg)
             return "Error: this exact tool call was already made with the same arguments. Do not repeat it; use the earlier result or change the arguments."
 
-        hooks = select_hooks(list(self._hooks.before_tool), name)
-        if hooks:
+        hook_context: HookContext | None = None
+        if self._hooks.before_tool:
+            hook_context = HookContext(self._session_id, self._context, tool)
             try:
-                outcome = await self._before_tool(hooks, tool, args, summary)
+                outcome = await self._before_tool(tool, args, summary, hook_context)
             except Exception as exc:  # noqa: BLE001 - a broken policy is an error, not silence
                 log.exception("before_tool hook failed for %s", name)
                 return self._fail(name, args, summary, exc, prefix="hook failed: ")
-            if isinstance(outcome, Deny):
+            if not outcome.allowed:
                 self._record(ToolCallRecord(name, args, summary, "blocked", error=outcome.message))
                 self._emit(EventType.TOOL_BLOCKED, tool=name, summary=summary, error=outcome.message)
                 return f"Error: {outcome.message}"
-            if isinstance(outcome, dict):  # arguments rewritten by a hook
+            if outcome.updated_arguments is not None:
                 try:
-                    args = tool.validate(outcome)
+                    args = tool.validate(outcome.updated_arguments)
                 except ToolArgumentError as exc:
-                    self._record(ToolCallRecord(name, args, summary, "invalid", error=str(exc)))
-                    self._emit(EventType.TOOL_FAILED, tool=name, summary=summary, error=str(exc))
-                    return f"Error: {exc}"
+                    return self._invalid(name, args, summary, exc)
                 summary = tool.summarize(args)
 
         pm = self._context.permission_manager
@@ -181,9 +178,7 @@ class ToolRunner:
                 try:
                     args = tool.validate(decided.updated_arguments)
                 except ToolArgumentError as exc:
-                    self._record(ToolCallRecord(name, args, summary, "invalid", error=str(exc)))
-                    self._emit(EventType.TOOL_FAILED, tool=name, summary=summary, error=str(exc))
-                    return f"Error: {exc}"
+                    return self._invalid(name, args, summary, exc)
                 summary = tool.summarize(args)
 
         self._emit(EventType.TOOL_STARTED, tool=name, summary=summary)
@@ -198,10 +193,11 @@ class ToolRunner:
             log.exception("tool %s crashed", name)
             return self._fail(name, args, summary, exc, started, prefix=f"{name} failed: ")
 
-        after = select_hooks(list(self._hooks.after_tool), name)
-        if after:
+        if self._hooks.after_tool:
+            if hook_context is None:
+                hook_context = HookContext(self._session_id, self._context, tool)
             try:
-                result = await self._after_tool(after, tool, args, summary, result)
+                result = await self._after_tool(tool, args, summary, result, hook_context)
             except Exception as exc:  # noqa: BLE001 - a broken policy is an error, not silence
                 log.exception("after_tool hook failed for %s", name)
                 return self._fail(name, args, summary, exc, started, prefix="hook failed: ")
@@ -223,43 +219,42 @@ class ToolRunner:
         )
         return content
 
-    def _hook_context(self, tool: Tool) -> HookContext:
-        return HookContext(
-            session_id=self._session_id,
-            workspace=self._context.workspace,
-            permissions=self._context.permission_manager,
-            environment=self._context.environment,
-            tool=tool,
-        )
-
     async def _before_tool(
-        self, hooks: list[Any], tool: Tool, args: dict[str, Any], summary: str
-    ) -> Deny | dict[str, Any] | None:
-        """Run the hooks in order. The first ``Deny`` wins; rewrites accumulate."""
-        context = self._hook_context(tool)
-        updated: dict[str, Any] | None = None
-        for hook in hooks:
-            call = ToolCallRequest(tool.name, dict(updated if updated is not None else args), summary, self._session_id)
-            outcome = await run_hook(hook, call, context)
-            if isinstance(outcome, Deny):
+        self, tool: Tool, args: dict[str, Any], summary: str, context: HookContext
+    ) -> PermissionOutcome:
+        """Run the hooks in order. The first denial wins; argument rewrites accumulate.
+
+        What an ``Allow`` / ``Deny`` means (including remembering a grant) is
+        :meth:`PermissionManager.resolve`'s job, so hooks and prompters cannot
+        drift apart.
+        """
+        pm = self._context.permission_manager
+        updated: Mapping[str, Any] | None = None
+        call = ToolCallRequest(tool.name, args, summary)
+        for hook in select_hooks(self._hooks.before_tool, tool.name):
+            outcome = pm.resolve(tool.name, await run_hook(hook, call, context))
+            if not outcome.allowed:
                 return outcome
-            if isinstance(outcome, Allow):
-                if outcome.remember_session:
-                    self._context.permission_manager.grant_session(tool.name)
-                if outcome.updated_arguments is not None:
-                    updated = dict(outcome.updated_arguments)
-        return updated
+            if outcome.updated_arguments is not None:
+                updated = outcome.updated_arguments
+                call = ToolCallRequest(tool.name, updated, summary)
+        return PermissionOutcome(True, updated_arguments=updated)
 
     async def _after_tool(
-        self, hooks: list[Any], tool: Tool, args: dict[str, Any], summary: str, result: ToolResult
+        self, tool: Tool, args: dict[str, Any], summary: str, result: ToolResult, context: HookContext
     ) -> ToolResult:
-        context = self._hook_context(tool)
-        call = ToolCallRequest(tool.name, dict(args), summary, self._session_id)
-        for hook in hooks:
+        call = ToolCallRequest(tool.name, args, summary)
+        for hook in select_hooks(self._hooks.after_tool, tool.name):
             replaced = await run_hook(hook, call, result, context)
             if replaced is not None:
                 result = replaced
         return result
+
+    def _invalid(self, name: str, args: dict[str, Any], summary: str, exc: ToolArgumentError) -> str:
+        """Record and report arguments that did not validate (raw, or rewritten by a hook)."""
+        self._record(ToolCallRecord(name, args, summary, "invalid", error=str(exc)))
+        self._emit(EventType.TOOL_FAILED, tool=name, summary=summary, error=str(exc))
+        return f"Error: {exc}"
 
     def _fail(self, name: str, args: dict[str, Any], summary: str, exc: BaseException, started: float | None = None, prefix: str = "") -> str:
         duration = (time.perf_counter() - started) * 1000 if started else 0.0

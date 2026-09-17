@@ -85,7 +85,6 @@ class PermissionOutcome:
     allowed: bool
     message: str | None = None
     updated_arguments: Mapping[str, Any] | None = None
-    remember_session: bool = False
 
 
 Prompter = Callable[[PermissionRequest], "Approval | Allow | Deny"]
@@ -181,14 +180,25 @@ class PermissionManager:
             return PermissionOutcome(True)
         if self._prompter is None:
             return PermissionOutcome(False)  # non-interactive: ask => deny
-        answer = self._prompter(request)
+        return self.resolve(request.tool_name, self._prompter(request))
+
+    def resolve(self, tool_name: str, answer: Approval | Allow | Deny | None) -> PermissionOutcome:
+        """Interpret one answer about ``tool_name``, wherever it came from.
+
+        Prompters and application hooks speak the same vocabulary, so what an
+        ``Allow`` or a ``Deny`` *means* — including remembering a grant for the
+        session — is decided here and nowhere else. ``None`` means "no opinion"
+        and leaves the call allowed to continue.
+        """
         if isinstance(answer, Deny):
             return PermissionOutcome(False, message=answer.message)
         if isinstance(answer, Allow):
             if answer.remember_session:
-                self.grant_session(request.tool_name)
-            return PermissionOutcome(True, updated_arguments=answer.updated_arguments, remember_session=answer.remember_session)
+                self.grant_session(tool_name)
+            return PermissionOutcome(True, updated_arguments=answer.updated_arguments)
         if answer is Approval.SESSION:
-            self.grant_session(request.tool_name)
+            self.grant_session(tool_name)
+            return PermissionOutcome(True)
+        if answer is None:
             return PermissionOutcome(True)
         return PermissionOutcome(answer is Approval.ONCE)

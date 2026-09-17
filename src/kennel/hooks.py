@@ -34,11 +34,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .permissions import Allow, Deny, PermissionManager
+from .tools.base import Tool, ToolContext, ToolResult
 from .workspace import Workspace
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .session import Session
-    from .tools.base import Tool, ToolResult
 
 __all__ = [
     "Allow",
@@ -55,28 +55,46 @@ __all__ = [
 
 @dataclass(frozen=True)
 class ToolCallRequest:
-    """The call a ``before_tool`` / ``after_tool`` hook is looking at."""
+    """The call a ``before_tool`` / ``after_tool`` hook is looking at.
+
+    ``arguments`` is the validated mapping the tool would run with; treat it as
+    read-only and return ``Allow(updated_arguments=...)`` to change it.
+    """
 
     name: str
     arguments: Mapping[str, Any]
     summary: str
-    session_id: str
 
 
 @dataclass(frozen=True)
 class HookContext:
-    """What a hook may look at besides the call itself."""
+    """What a hook may look at besides the call itself.
+
+    It wraps the same :class:`~kennel.ToolContext` the tool will run with, so a
+    hook sees exactly what the tool sees, and nothing has to be re-plumbed here
+    when that context grows.
+    """
 
     session_id: str
-    workspace: Workspace
-    permissions: PermissionManager
-    environment: Mapping[str, str] = field(default_factory=dict)
+    tool_context: ToolContext
     tool: Tool | None = None
+
+    @property
+    def workspace(self) -> Workspace:
+        return self.tool_context.workspace
+
+    @property
+    def permissions(self) -> PermissionManager:
+        return self.tool_context.permission_manager
+
+    @property
+    def environment(self) -> Mapping[str, str]:
+        return self.tool_context.environment
 
 
 HookResult = Allow | Deny | None
 BeforeToolHook = Callable[[ToolCallRequest, HookContext], HookResult | Awaitable[HookResult]]
-AfterToolHook = Callable[[ToolCallRequest, "ToolResult", HookContext], Any]
+AfterToolHook = Callable[[ToolCallRequest, ToolResult, HookContext], "ToolResult | None | Awaitable[ToolResult | None]"]
 BeforePromptHook = Callable[[str, "Session"], str | None | Awaitable[str | None]]
 ToolHook = BeforeToolHook | AfterToolHook
 
@@ -88,10 +106,8 @@ class HookMatcher:
     tools: Sequence[str] | None = None
     hooks: Sequence[ToolHook] = ()
 
-    def select(self, tool_name: str) -> list[ToolHook]:
-        if self.tools is None or tool_name in self.tools:
-            return list(self.hooks)
-        return []
+    def matches(self, tool_name: str) -> bool:
+        return self.tools is None or tool_name in self.tools
 
 
 @dataclass
@@ -115,7 +131,8 @@ def select_hooks(entries: Sequence[ToolHook | HookMatcher], tool_name: str) -> l
     selected: list[ToolHook] = []
     for entry in entries:
         if isinstance(entry, HookMatcher):
-            selected.extend(entry.select(tool_name))
+            if entry.matches(tool_name):
+                selected.extend(entry.hooks)
         else:
             selected.append(entry)
     return selected
