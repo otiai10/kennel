@@ -138,6 +138,27 @@ await session.run("Summarize transcripts/2026-09-16.txt")
 await session.run("Now only the TODOs")
 ```
 
+To follow a turn as it happens, iterate it instead. `Session.stream()` yields the session's
+events on *your* event loop — including the ones a provider fires from a worker thread — so
+no queue plumbing or thread-safety work is needed on the application side. A session is also
+an async context manager, so `close()` runs on the way out:
+
+```python
+async with agent.new_session() as session:
+    async for event in session.stream("Summarize the latest transcript"):
+        if event.type == "model.delta":
+            print(event.data["text"], end="", flush=True)
+        elif event.type.startswith("tool."):
+            print(event.type, event.data.get("summary"))
+    print(session.last_result.stop_reason)      # the full AgentResult of the last turn
+```
+
+The iterator's last event is `session.completed`, whose `data` carries `text`, `stop_reason`,
+`tool_calls` and `turns`. A provider failure is raised out of the `async for` after the
+`session.failed` event has been delivered. `Agent.stream(prompt)` is the one-shot form: it
+runs a throwaway session and its final `session.completed` event carries the same `text` that
+`Agent.run()` would return. `run(on_delta=...)` still works and is unchanged.
+
 Permissions are per tool (`allow`, `ask`, `deny`); `ask` needs a prompter, otherwise it
 means `deny`:
 
@@ -172,6 +193,8 @@ agent = Agent(".", tools=["read", ListMeetings()])
 Events (`session.started`, `tool.started`, `tool.completed`, `permission.requested`,
 `model.delta`, ...) are available through `agent.events.subscribe(callback)`; the CLI
 renderer is just one subscriber. Events carry summaries and sizes, never file contents.
+`Session.stream()` is the async-iterator view of the same events, for consumers that would
+rather `async for` than register a callback.
 
 The default instructions tell the model to glob, then grep/read, then answer, and include a
 one-line overview of the workspace's top-level entries. On the on-device model this is what

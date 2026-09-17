@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .context import HistoryTurn, compact_history, looks_like_tool_narration
 from .errors import ContextLimitError, KennelError, ProviderError
-from .events import EventType
+from .events import Event, EventType
 from .providers.base import ProviderSession
 from .runner import ToolCallRecord, ToolRunner
 
@@ -54,6 +54,7 @@ class Session:
         self.id = session_id or uuid.uuid4().hex[:12]
         self.history: list[Turn] = []
         self.compactions = 0
+        self.last_result: AgentResult | None = None
         self._provider_session: ProviderSession | None = None
         self._started = False
         self._failed = False
@@ -66,6 +67,12 @@ class Session:
         )
 
     # -- lifecycle ------------------------------------------------------------
+
+    async def __aenter__(self) -> Session:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        await self.close()
 
     def _emit(self, type: str, **data: Any) -> None:
         if type == EventType.SESSION_FAILED:
@@ -185,7 +192,76 @@ class Session:
         records = self.runner.turn_records()
         self.history.append(Turn(prompt, text, stop_reason, records))
         self._emit(EventType.MODEL_COMPLETED, stop_reason=stop_reason, chars=len(text), tool_calls=len(records))
-        return AgentResult(text=text, stop_reason=stop_reason, tool_calls=records, usage=None, session_id=self.id)
+        self.last_result = AgentResult(
+            text=text, stop_reason=stop_reason, tool_calls=records, usage=None, session_id=self.id
+        )
+        return self.last_result
+
+    async def stream(self, prompt: str) -> AsyncIterator[Event]:
+        """Run ``prompt`` and yield this session's events on the calling event loop.
+
+        The turn runs as a task while events are relayed through an
+        :class:`asyncio.Queue`, so tool callbacks firing on a provider worker
+        thread still reach the consumer's loop. The iterator ends with a
+        ``session.completed`` event carrying the final ``text``, ``stop_reason``
+        and ``tool_calls`` count; :attr:`last_result` holds the full
+        :class:`AgentResult`. A provider failure is raised out of the iterator
+        after the ``session.failed`` event has been yielded.
+
+        Example::
+
+            async with agent.new_session() as session:
+                async for event in session.stream("Summarize today's transcript"):
+                    print(event.type, event.data)
+                print(session.last_result.text)
+        """
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[Event | None] = asyncio.Queue()
+
+        def put(event: Event | None) -> None:
+            try:
+                if asyncio.get_running_loop() is loop:
+                    queue.put_nowait(event)
+                    return
+            except RuntimeError:
+                pass  # emitted from a provider worker thread: hand it to the consumer's loop
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+            except RuntimeError:  # pragma: no cover - the consumer's loop went away
+                pass
+
+        def relay(event: Event) -> None:
+            # Deltas are re-emitted below with their text; the bus only carries sizes.
+            if event.session_id == self.id and event.type != EventType.MODEL_DELTA:
+                put(event)
+
+        def on_delta(delta: str) -> None:
+            put(Event(EventType.MODEL_DELTA, self.id, {"chars": len(delta), "text": delta}))
+
+        unsubscribe = self.agent.events.subscribe(relay)
+        task = loop.create_task(self.run(prompt, on_delta=on_delta))
+        task.add_done_callback(lambda _: put(None))
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield event
+            result = await task  # re-raises after session.failed has been yielded
+            yield Event(
+                EventType.SESSION_COMPLETED,
+                self.id,
+                {
+                    "turns": len(self.history),
+                    "stop_reason": result.stop_reason,
+                    "tool_calls": len(result.tool_calls),
+                    "text": result.text,
+                },
+            )
+        finally:
+            unsubscribe()
+            if not task.done():
+                task.cancel()
 
     def _should_nudge(self, text: str) -> bool:
         if not self.agent.tools or not self.agent.config.nudge_narration:

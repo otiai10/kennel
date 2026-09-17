@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from pathlib import Path
 
 from .config import KennelConfig, load_config
-from .events import EventBus
+from .events import Event, EventBus
 from .permissions import Decision, PermissionManager, Prompter
 from .providers.base import ModelProvider
 from .registry import DEFAULT_TOOLS, ToolRegistry, builtin_registry
@@ -96,6 +96,20 @@ class Agent:
         session = self.new_session()
         try:
             return await session.run(prompt, **kwargs)
+        finally:
+            await session.close()
+
+    async def stream(self, prompt: str) -> AsyncIterator[Event]:
+        """Run ``prompt`` in a fresh session and yield its events as they happen.
+
+        The last event is ``session.completed``; its ``data["text"]`` is the same
+        answer :meth:`run` returns. Use :meth:`new_session` when you need the
+        ``AgentResult`` itself or more than one turn.
+        """
+        session = self.new_session()
+        try:
+            async for event in session.stream(prompt):
+                yield event
         finally:
             await session.close()
 

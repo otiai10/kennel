@@ -1,6 +1,7 @@
 """Agent/Session behaviour, driven deterministically by MockProvider."""
 
 import asyncio
+import threading
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from kennel import (
     ContextLimitError,
     EventType,
     KennelConfig,
+    KennelError,
     MockProvider,
     PermissionKind,
     ProviderError,
@@ -237,7 +239,7 @@ async def test_custom_tool_and_extra_instructions(meeting_ws):
 
 
 async def test_empty_prompt_and_unavailable(meeting_ws):
-    from kennel import KennelError, ModelUnavailableError
+    from kennel import ModelUnavailableError
 
     agent, _, _ = make_agent(meeting_ws, [])
     with pytest.raises(KennelError):
@@ -311,3 +313,93 @@ async def test_nudge_disabled_by_config_or_without_tools(meeting_ws):
     assert (await agent.run("x")).text == NARRATION and len(provider.sessions[0].prompts) == 1
     agent, provider, _ = make_agent(meeting_ws, [NARRATION], tools=[])
     assert (await agent.run("x")).text == NARRATION and len(provider.sessions[0].prompts) == 1
+
+
+# -- streaming events / async with -------------------------------------------
+
+STREAM_TURN = [ToolCall("glob", {"pattern": "*.md"}), Text("streamed answer text")]
+
+
+async def test_session_stream_event_order_and_last_result(meeting_ws):
+    agent, _, _ = make_agent(meeting_ws, [list(STREAM_TURN)])
+    session = agent.new_session()
+    events = [e async for e in session.stream("go")]
+    types = [e.type for e in events]
+    order = [
+        EventType.SESSION_STARTED,
+        EventType.TOOL_STARTED,
+        EventType.TOOL_COMPLETED,
+        EventType.MODEL_DELTA,
+        EventType.SESSION_COMPLETED,
+    ]
+    assert [types.index(t) for t in order] == sorted(types.index(t) for t in order)
+    assert types[0] == EventType.SESSION_STARTED and types[-1] == EventType.SESSION_COMPLETED
+    assert all(e.session_id == session.id for e in events)
+    deltas = [e.data["text"] for e in events if e.type == EventType.MODEL_DELTA]
+    assert "".join(deltas) == "streamed answer text" and len(deltas) > 1
+    baseline, _, _ = make_agent(meeting_ws, [list(STREAM_TURN)])
+    assert session.last_result.text == (await baseline.run("go")).text
+    assert events[-1].data == {
+        "turns": 1,
+        "stop_reason": "end_turn",
+        "tool_calls": 1,
+        "text": "streamed answer text",
+    }
+    await session.close()
+
+
+async def test_stream_delivers_worker_thread_events_on_the_calling_loop(meeting_ws):
+    agent, _, _ = make_agent(meeting_ws, [list(STREAM_TURN)])
+    session = agent.new_session()
+    loop = asyncio.get_running_loop()
+    loops, types, pinged = [], [], False
+    async for event in session.stream("go"):
+        loops.append(asyncio.get_running_loop())
+        types.append(event.type)
+        if not pinged:  # emit from a non-loop thread, as provider tool callbacks do
+            pinged = True
+            thread = threading.Thread(target=agent.events.emit, args=("thread.ping", session.id))
+            thread.start()
+            thread.join()
+    assert loops and all(seen is loop for seen in loops)
+    assert "thread.ping" in types
+    await session.close()
+
+
+async def test_stream_reraises_provider_failure_after_session_failed(meeting_ws):
+    agent, _, _ = make_agent(meeting_ws, [[Raise(RuntimeError("boom"))]])
+    session = agent.new_session()
+    types = []
+    with pytest.raises(ProviderError, match="boom"):
+        async for event in session.stream("x"):
+            types.append(event.type)
+    assert types[-1] == EventType.SESSION_FAILED
+    assert EventType.SESSION_COMPLETED not in types
+    await session.close()
+
+
+async def test_async_with_closes_the_session(meeting_ws):
+    agent, provider, events = make_agent(meeting_ws, ["hi"])
+    async with agent.new_session() as session:
+        assert (await session.run("q")).text == "hi"
+    assert provider.sessions[0].closed
+    assert events[-1].type == EventType.SESSION_COMPLETED
+
+
+async def test_async_with_closes_the_session_on_error(meeting_ws):
+    agent, provider, _ = make_agent(meeting_ws, [])
+    with pytest.raises(KennelError):
+        async with agent.new_session() as session:
+            await session.run("   ")
+    assert not provider.sessions  # nothing opened, and the error is not swallowed
+    async with agent.new_session() as session:
+        await session.run("q")
+    assert provider.sessions[0].closed
+
+
+async def test_agent_stream_matches_agent_run(meeting_ws):
+    agent, _, _ = make_agent(meeting_ws, [list(STREAM_TURN)])
+    events = [e async for e in agent.stream("go")]
+    assert events[-1].type == EventType.SESSION_COMPLETED
+    baseline, _, _ = make_agent(meeting_ws, [list(STREAM_TURN)])
+    assert events[-1].data["text"] == (await baseline.run("go")).text == "streamed answer text"
