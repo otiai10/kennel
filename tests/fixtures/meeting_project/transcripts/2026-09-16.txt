@@ -1,0 +1,12 @@
+Kennel release planning — 2026-09-16
+Attendees: Alice, Bob, Chen
+
+Alice: The read-only agent works end to end now. Should we ship v0.1 this week?
+Bob: The CLI still needs the permission prompt for write and edit.
+Chen: I can finish the permission prompt tomorrow.
+Alice: Then let's decide: we ship v0.1 on Friday.
+Bob: Decision noted. We also need release notes.
+Alice: Someone has to write them; let's not assign it yet.
+Chen: Also unresolved: whether the web tool ships disabled or is left out entirely.
+Alice: Let's keep it disabled by default and document it. Bob, please update the README security section before Friday.
+Bob: Will do.

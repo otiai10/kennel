@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kennel"
+version = "0.1.0"
+description = "Lightweight local agent runtime, Python SDK and CLI for Apple Foundation Models"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Hiromu OCHIAI" }]
+keywords = ["apple", "foundation-models", "agent", "on-device", "cli"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# Core has no third-party runtime dependency. The Apple provider needs apple-fm-sdk.
+dependencies = []
+
+[project.optional-dependencies]
+# NOTE: apple-fm-sdk 0.2.1 fails to build with Xcode 26.x (needs the macOS 27 SDK).
+# Pin 0.2.0 until a matching Xcode is installed: pip install "apple-fm-sdk==0.2.0"
+apple = ["apple-fm-sdk>=0.2.0"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
+
+[project.scripts]
+kennel = "kennel.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/otiai10/kennel"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+  "apple: requires Apple Foundation Models on this Mac (set KENNEL_APPLE_TESTS=1 to run)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]

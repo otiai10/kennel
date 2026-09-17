@@ -1,0 +1,10 @@
+Kennel weekly sync — 2026-09-15
+Attendees: Alice, Bob, Chen
+
+Alice: Let's start with the test framework. We have been going back and forth between unittest and pytest.
+Bob: I vote pytest. The fixtures are nicer and pytest-asyncio handles our async tools.
+Chen: Agreed. Decision: we adopt pytest for all new tests.
+Alice: Good. Bob, can you set up the CI config this week?
+Bob: Yes, I'll write the GitHub Actions workflow by Thursday.
+Chen: One open question: do we run the Apple integration tests in CI at all? The runners don't have Apple Silicon.
+Alice: Let's leave that unresolved for now and revisit once the runtime is stable.
