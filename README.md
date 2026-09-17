@@ -73,12 +73,17 @@ kennel --help
 > shipped with Xcode 27, so with Xcode 26.x it fails to compile. The upper bound will be
 > lifted once a matching Xcode is common.
 
-Check that the model is usable:
+Check that Kennel can run here:
 
 ```bash
-fm available          # Apple's CLI: "System model available"
-kennel . -p "hello"   # exit code 3 with a clear message if the model is unavailable
+kennel doctor
 ```
+
+This checks the Python version, platform, `apple_fm_sdk` install and model availability,
+Xcode, user/project config files, the workspace, and prints the effective tools/permissions.
+Failing checks show `✗` with a reason and, where there is one, a fix; add `--json` for a
+machine-readable report (handy when filing a bug: paste the output of `kennel doctor --json`).
+Exit code is `0` when everything checks out, `1` otherwise.
 
 ## CLI
 
