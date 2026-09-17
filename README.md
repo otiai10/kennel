@@ -98,6 +98,7 @@ kennel -p "Read the README and explain this project"   # one-shot
 | `--non-interactive` | never prompt; anything that would ask is denied |
 | `--max-tool-calls N` | tool call budget per turn (default 32) |
 | `--output-format FORMAT` | with `-p`: `text` (default), `json`, `stream-json` |
+| `--json-schema TEXT\|@FILE` | with `-p`: answer under a JSON schema (guided generation) |
 | `--verbose` | show tool output sizes and timings |
 | `--trace` | write every agent event as JSON lines to stderr |
 
@@ -116,6 +117,14 @@ kennel . -p "summarize the README" --output-format stream-json
 
 In both formats stdout is JSON only; diagnostics stay on stderr. The keys, the event types
 and the versioning promise are documented in [docs/output-format.md](docs/output-format.md).
+
+`--json-schema` answers under a schema instead of in prose. Tools still work, so the model
+can look things up and then fill the schema in one request:
+
+```bash
+kennel ~/meetings -p "extract the decisions from the latest transcript" --json-schema @schema.json
+# {"title": "Release planning", "decisions": ["Ship v0.1 on Friday"]}
+```
 
 Interactive commands: `/help`, `/status`, `/clear`, `/exit`. `Ctrl-C` cancels the current
 answer (twice at the prompt exits); `Ctrl-D` exits.
@@ -211,10 +220,20 @@ turn ends with no tool call and the answer looks like that, Kennel re-prompts on
 the same session to carry the steps out; the CLI shows `↻ carrying out the described
 steps`. Set `"nudge_narration": false` under `"agent"` in `kennel.json` to turn it off.
 
-Structured output for application use goes through `ProviderSession.respond_structured`
-(Apple guided generation). `examples/meeting_summary.py` shows the reference workflow:
-chunk a transcript, extract a `MeetingSummary` per chunk, reduce. Owners and due dates
-that are not in the transcript stay `None`.
+**Structured output.** Pass a JSON schema to get a value instead of prose (Apple guided
+generation). Tools keep working: the provider calls them inside the same request, so
+`tool_calls` is populated as usual.
+
+```python
+result = await agent.run("Extract the decisions from the latest transcript", schema=MEETING_SCHEMA)
+result.structured_output          # dict
+result.text                       # the same document as JSON
+```
+
+`examples/meeting_summary.py` shows the reference workflow: chunk a transcript, extract a
+`MeetingSummary` per chunk with `agent.run(schema=...)`, reduce. Owners and due dates that
+are not in the transcript stay `None`. `ProviderSession.respond_structured` remains the
+provider-level primitive underneath.
 
 ## Configuration
 

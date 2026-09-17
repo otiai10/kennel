@@ -1,8 +1,13 @@
 """Reference workflow: structured meeting summary from a transcript file.
 
 Kennel core does not know what a "meeting" is; this example shows how an
-application layers a domain schema on top of the SDK: bounded reads, chunking
-for long transcripts, guided generation per chunk, and a structured reduce.
+application layers a domain schema on top of the SDK: chunking for long
+transcripts, ``Agent.run(prompt, schema=...)`` per chunk, and a structured reduce.
+
+The agent is built with ``tools=[]``: the transcript text is passed in the prompt, so
+there is nothing to look up and each chunk costs exactly one model request. Note that
+``Agent`` prepends its default instructions (a glob/read procedure) to the domain
+instructions below; replacing rather than appending them is a separate feature.
 
 Usage::
 
@@ -93,17 +98,24 @@ INSTRUCTIONS = (
 )
 
 
-async def summarize_transcript(provider: ModelProvider, text: str, *, chunk_chars: int = 6000) -> MeetingSummary:
+def build_agent(provider: ModelProvider | None = None, workspace: str | Path = ".") -> Agent:
+    """An extraction-only agent: no tools, the domain instructions, one request per call."""
+    return Agent(workspace, tools=[], instructions=INSTRUCTIONS, provider=provider)
+
+
+async def extract(agent: Agent, prompt: str) -> MeetingSummary:
+    result = await agent.run(prompt, schema=MEETING_SCHEMA)
+    return MeetingSummary.from_dict(result.structured_output or {})
+
+
+async def summarize_transcript(provider: ModelProvider | None, text: str, *, chunk_chars: int = 6000) -> MeetingSummary:
     """Map each chunk to a structured partial, then reduce into one MeetingSummary."""
+    agent = build_agent(provider)
     chunks = chunk_text(text, max_chars=chunk_chars, overlap=200)
     partials: list[MeetingSummary] = []
     for index, chunk in enumerate(chunks, 1):
-        session = await provider.create_session(instructions=INSTRUCTIONS, tools=[], invoke=None)
-        try:
-            prompt = f"Transcript part {index} of {len(chunks)}:\n\n{chunk}\n\nExtract the summary, decisions, action items and unresolved topics from this part."
-            partials.append(MeetingSummary.from_dict(await session.respond_structured(prompt, MEETING_SCHEMA)))
-        finally:
-            await session.close()
+        prompt = f"Transcript part {index} of {len(chunks)}:\n\n{chunk}\n\nExtract the summary, decisions, action items and unresolved topics from this part."
+        partials.append(await extract(agent, prompt))
     if len(partials) == 1:
         return partials[0]
     merged = MeetingSummary(
@@ -113,16 +125,12 @@ async def summarize_transcript(provider: ModelProvider, text: str, *, chunk_char
         action_items=[a for p in partials for a in p.action_items],
         unresolved_topics=[t for p in partials for t in p.unresolved_topics],
     )
-    session = await provider.create_session(instructions=INSTRUCTIONS, tools=[], invoke=None)
-    try:
-        prompt = (
-            "These are partial extractions from consecutive parts of one meeting. Merge them: remove duplicates, "
-            "keep every distinct decision, task, owner and date exactly as given, and write one overall summary of "
-            f"at most three sentences.\n\n{json.dumps(asdict(merged), ensure_ascii=False, indent=1)}"
-        )
-        reduced = MeetingSummary.from_dict(await session.respond_structured(prompt, MEETING_SCHEMA))
-    finally:
-        await session.close()
+    reduced = await extract(
+        agent,
+        "These are partial extractions from consecutive parts of one meeting. Merge them: remove duplicates, "
+        "keep every distinct decision, task, owner and date exactly as given, and write one overall summary of "
+        f"at most three sentences.\n\n{json.dumps(asdict(merged), ensure_ascii=False, indent=1)}",
+    )
     if not reduced.decisions and merged.decisions:
         reduced.decisions = merged.decisions
     if not reduced.action_items and merged.action_items:
@@ -131,7 +139,7 @@ async def summarize_transcript(provider: ModelProvider, text: str, *, chunk_char
 
 
 async def main(path: str) -> None:
-    agent = Agent(Path(path).parent, tools=["read"])
+    agent = build_agent(workspace=Path(path).parent)
     agent.check_availability()
     text = Path(path).read_text(encoding="utf-8")
     summary = await summarize_transcript(agent.provider, text)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from collections.abc import Callable
@@ -145,11 +146,22 @@ class Session:
 
     # -- running --------------------------------------------------------------
 
-    async def run(self, prompt: str, *, on_delta: Callable[[str], None] | None = None) -> AgentResult:
+    async def run(
+        self,
+        prompt: str,
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        schema: dict[str, Any] | None = None,
+    ) -> AgentResult:
         """Send ``prompt`` and return the final answer once the model stops calling tools.
 
         With ``on_delta`` the answer is streamed and the callback receives text
         deltas as they arrive (also emitted as ``model.delta`` events).
+
+        With ``schema`` (a JSON schema) the model answers under guided generation:
+        the value lands in :attr:`AgentResult.structured_output` and its JSON text in
+        :attr:`AgentResult.text`. Tools still work — the provider calls them inside the
+        same request — so ``tool_calls`` is populated as usual.
         """
         if not prompt.strip():
             raise KennelError("Prompt must not be empty")
@@ -168,9 +180,25 @@ class Session:
         text = ""
         attempt = 0
         timeout = self.agent.config.turn_timeout_seconds
+        structured: dict[str, Any] | None = None
+
+        async def generate() -> str:
+            nonlocal structured
+            if schema is None:
+                return await self._generate(prompt, on_delta)
+            provider = await self._provider(self._compaction_note())
+            data = await provider.respond_structured(prompt, schema)
+            structured = data
+            # Guided generation arrives whole, so the answer is one delta.
+            answer = json.dumps(data, ensure_ascii=False, indent=2)
+            self._emit(EventType.MODEL_DELTA, chars=len(answer))
+            if on_delta is not None:
+                on_delta(answer)
+            return answer
+
         while True:
             try:
-                text = await asyncio.wait_for(self._generate(prompt, on_delta), timeout)
+                text = await asyncio.wait_for(generate(), timeout)
                 break
             except ContextLimitError:
                 if attempt >= 1 or not self.history:
@@ -198,7 +226,7 @@ class Session:
             except Exception as exc:  # noqa: BLE001 - provider bug surfaced as a KennelError
                 self._emit(EventType.SESSION_FAILED, error=str(exc))
                 raise ProviderError(f"The model request failed: {exc}") from exc
-        if stop_reason == "end_turn" and self._should_nudge(text):
+        if schema is None and stop_reason == "end_turn" and self._should_nudge(text):
             # The model narrated tool steps instead of taking them: continue once.
             self._emit(EventType.MODEL_NUDGED, chars=len(text))
             try:
@@ -223,6 +251,7 @@ class Session:
             session_id=self.id,
             duration_ms=(time.perf_counter() - started) * 1000,
             is_error=stop_reason == "timeout",
+            structured_output=structured,
             compactions=self.compactions,
         )
 

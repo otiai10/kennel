@@ -83,7 +83,22 @@ class MockSession(ProviderSession):
             await asyncio.sleep(0)
 
     async def respond_structured(self, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+        """Return the next scripted value, running the next turn's tool steps first.
+
+        Apple's guided generation calls tools inside the same request, so a script
+        reproduces that by pairing a step list (its :class:`Text` step is ignored) with
+        a ``structured`` value. Scripts without turns behave as before.
+        """
         self.prompts.append(prompt)
+        turn = self.provider._next_turn()
+        if turn is not None and not isinstance(turn, str) and not callable(turn):
+            for step in turn:
+                if isinstance(step, ToolCall):
+                    self.tool_results.append(await self.invoke(step.name, dict(step.arguments)))
+                elif isinstance(step, Raise):
+                    raise step.error
+                elif isinstance(step, Sleep):
+                    await asyncio.sleep(step.seconds)
         if not self.provider._structured:
             raise ProviderError("MockProvider has no structured responses left")
         return self.provider._structured.pop(0)

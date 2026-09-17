@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -17,7 +18,7 @@ from ..agent import Agent
 from ..errors import ConfigurationError, KennelError, ModelUnavailableError
 from ..registry import DEFAULT_TOOLS, READ_ONLY_TOOLS
 from ..session import AgentResult, Session
-from .output import FORMATS, JsonOutput
+from .output import FORMATS, DocumentOutput, JsonOutput, MachineOutput
 from .renderer import ConsolePrompter, Renderer
 
 PROMPT = "> "
@@ -46,6 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FORMAT",
         help="stdout format for -p: text (default), json (one result object), stream-json (one JSON per line)",
     )
+    p.add_argument(
+        "--json-schema",
+        metavar="TEXT|@FILE",
+        help="with -p: answer under a JSON schema (guided generation) instead of prose",
+    )
     p.add_argument("--verbose", action="store_true", help="show tool result sizes and diagnostics")
     p.add_argument("--trace", action="store_true", help="write every agent event as JSON to stderr")
     p.add_argument("--version", action="version", version=f"kennel {__version__}")
@@ -67,6 +73,26 @@ def _make_provider(name: str):
     from ..providers.apple import AppleProvider
 
     return AppleProvider()
+
+
+def load_schema(value: str | None) -> dict | None:
+    """Read a JSON schema given inline or as ``@path``."""
+    if value is None:
+        return None
+    text = value
+    if value.startswith("@"):
+        path = Path(value[1:]).expanduser()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ConfigurationError(f"--json-schema: cannot read {path}: {exc}") from exc
+    try:
+        schema = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError(f"--json-schema: invalid JSON ({exc})") from exc
+    if not isinstance(schema, dict):
+        raise ConfigurationError("--json-schema: the schema must be a JSON object")
+    return schema
 
 
 def build_agent(args: argparse.Namespace, prompter: ConsolePrompter | None) -> Agent:
@@ -97,7 +123,7 @@ def build_agent(args: argparse.Namespace, prompter: ConsolePrompter | None) -> A
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
-    machine = args.output_format != "text"
+    machine = args.output_format != "text" or args.json_schema is not None
     # In a machine format stdout is JSON only, so anything human (including the
     # permission prompt) moves to stderr.
     human = sys.stderr if machine else sys.stdout
@@ -105,29 +131,33 @@ def main(argv: list[str] | None = None) -> int:
     interactive_permissions = sys.stdin.isatty() and not args.non_interactive
     prompter = ConsolePrompter(out=human, color=color) if interactive_permissions else None
     renderer = Renderer(verbose=args.verbose, trace=args.trace, color=color, quiet=machine)
-    # Only established once the flag itself is valid: until then errors are plain text.
-    json_out: JsonOutput | None = None
+    # Only established once the flags themselves are valid: until then errors are plain text.
+    machine_out: MachineOutput | None = None
     try:
-        if machine:
-            if args.prompt is None:
-                raise ConfigurationError(f"--output-format {args.output_format} needs -p/--prompt")
-            json_out = JsonOutput(args.output_format)
+        if machine and args.prompt is None:
+            flag = "--json-schema" if args.output_format == "text" else f"--output-format {args.output_format}"
+            raise ConfigurationError(f"{flag} needs -p/--prompt")
+        schema = load_schema(args.json_schema)
+        if args.output_format != "text":
+            machine_out = JsonOutput(args.output_format)
+        elif schema is not None:
+            machine_out = DocumentOutput()
         agent = build_agent(args, prompter)
         agent.check_availability()
         renderer.attach(agent.events)
-        if json_out is not None:
-            json_out.attach(agent.events)
+        if machine_out is not None:
+            machine_out.attach(agent.events)
         if args.prompt is not None:
-            return run_once(agent, args.prompt, renderer, prompter, json_out)
+            return run_once(agent, args.prompt, renderer, prompter, machine_out, schema)
         return run_interactive(agent, renderer, prompter)
     except ModelUnavailableError as exc:
-        return _fail(renderer, json_out, str(exc), 3)
+        return _fail(renderer, machine_out, str(exc), 3)
     except ConfigurationError as exc:
-        return _fail(renderer, json_out, str(exc), 2)
+        return _fail(renderer, machine_out, str(exc), 2)
     except KennelError as exc:
         if args.verbose:
             traceback.print_exc()
-        return _fail(renderer, json_out, str(exc), 1)
+        return _fail(renderer, machine_out, str(exc), 1)
     except KeyboardInterrupt:
         return 130
     except BrokenPipeError:
@@ -139,11 +169,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
 
-def _fail(renderer: Renderer, json_out: JsonOutput | None, message: str, code: int) -> int:
+def _fail(renderer: Renderer, machine_out: MachineOutput | None, message: str, code: int) -> int:
     """Report an error on stderr and, in a machine format, as a result record."""
     renderer.error(message)
-    if json_out is not None:
-        json_out.error(message)
+    if machine_out is not None:
+        machine_out.error(message)
     return code
 
 
@@ -153,7 +183,8 @@ def _run_turn(
     prompt: str,
     renderer: Renderer,
     prompter: ConsolePrompter | None,
-    json_out: JsonOutput | None = None,
+    machine_out: MachineOutput | None = None,
+    schema: dict | None = None,
 ) -> AgentResult | None:
     """Run one turn on ``loop``; Ctrl-C cancels the turn and returns None."""
     if prompter is not None:
@@ -161,10 +192,10 @@ def _run_turn(
 
     def on_delta(text: str) -> None:
         renderer.delta(text)
-        if json_out is not None:
-            json_out.delta(text)
+        if machine_out is not None:
+            machine_out.delta(text)
 
-    task = loop.create_task(session.run(prompt, on_delta=on_delta))
+    task = loop.create_task(session.run(prompt, on_delta=on_delta, schema=schema))
 
     def on_sigint() -> None:
         if prompter is not None:
@@ -188,11 +219,18 @@ def _run_turn(
             pass
 
 
-def run_once(agent: Agent, prompt: str, renderer: Renderer, prompter: ConsolePrompter | None, json_out: JsonOutput | None = None) -> int:
+def run_once(
+    agent: Agent,
+    prompt: str,
+    renderer: Renderer,
+    prompter: ConsolePrompter | None,
+    machine_out: MachineOutput | None = None,
+    schema: dict | None = None,
+) -> int:
     loop = asyncio.new_event_loop()
     session = agent.new_session()
     try:
-        result = _run_turn(loop, session, prompt, renderer, prompter, json_out)
+        result = _run_turn(loop, session, prompt, renderer, prompter, machine_out, schema)
         renderer.finish_answer()
         code = 0
         if result is None:
@@ -205,11 +243,11 @@ def run_once(agent: Agent, prompt: str, renderer: Renderer, prompter: ConsolePro
     finally:
         loop.run_until_complete(session.close())  # the closing events precede the result line
         loop.close()
-    if json_out is not None:
+    if machine_out is not None:
         if result is None:
-            json_out.error("the turn was cancelled", stop_reason="cancelled")
+            machine_out.error("the turn was cancelled", stop_reason="cancelled")
         else:
-            json_out.result(result)
+            machine_out.result(result)
     return code
 
 
