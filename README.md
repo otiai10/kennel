@@ -100,8 +100,15 @@ kennel -p "Read the README and explain this project"   # one-shot
 | `--verbose` | show tool output sizes and timings |
 | `--trace` | write every agent event as JSON lines to stderr |
 
-Interactive commands: `/help`, `/status`, `/clear`, `/exit`. `Ctrl-C` cancels the current
-answer (twice at the prompt exits); `Ctrl-D` exits.
+Interactive commands: `/help`, `/status`, `/clear`, `/compact`, `/permissions [<tool>
+allow|ask|deny]`, `/exit`. `Ctrl-C` cancels the current answer (twice at the prompt exits);
+`Ctrl-D` exits.
+
+`/compact` summarizes the conversation so far and starts a fresh model session seeded with
+that summary (this happens automatically when a turn no longer fits the context window;
+`/compact` lets you do it on your own terms). `/permissions` alone prints the decision
+(`allow`/`ask`/`deny`) and session grant for every enabled tool; `/permissions shell allow`
+changes a tool's decision for the rest of the session (not written back to `kennel.json`).
 
 Every tool call is shown as one line (`● Read transcripts/2026-09-16.txt [1-50]`). Mutations
 ask first:

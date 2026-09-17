@@ -10,11 +10,13 @@ import signal
 import sys
 import time
 import traceback
+from collections.abc import Callable
 from pathlib import Path
 
 from .. import __version__
 from ..agent import Agent
 from ..errors import ConfigurationError, KennelError, ModelUnavailableError
+from ..permissions import Decision
 from ..registry import DEFAULT_TOOLS, READ_ONLY_TOOLS
 from ..session import AgentResult, Session
 from .renderer import ConsolePrompter, Renderer
@@ -186,12 +188,81 @@ def _header(agent: Agent) -> str:
     )
 
 
-HELP = """Commands:
-  /help     show this help
-  /status   show session, model and tool status
-  /clear    forget the conversation
-  /exit     leave (also /quit or Ctrl-D)
-Ctrl-C cancels the current answer; press it twice at the prompt to exit."""
+_HELP_COMMANDS = (
+    ("/help", "show this help"),
+    ("/status", "show session, model and tool status"),
+    ("/clear", "forget the conversation"),
+    ("/compact", "summarize the conversation so far to save context"),
+    ("/permissions", "show the permission decision for every tool"),
+    ("/permissions <tool> <mode>", "set a tool's decision for this session (allow, ask or deny)"),
+    ("/exit", "leave (also /quit or Ctrl-D)"),
+)
+HELP = "Commands:\n" + "\n".join(f"  {name:<28}{desc}" for name, desc in _HELP_COMMANDS) + (
+    "\nCtrl-C cancels the current answer; press it twice at the prompt to exit."
+)
+
+
+def _build_commands(
+    agent: Agent, session: Session, renderer: Renderer, loop: asyncio.AbstractEventLoop
+) -> dict[str, Callable[[list[str]], None]]:
+    out = renderer.out
+
+    def cmd_help(_args: list[str]) -> None:
+        out.write(HELP + "\n")
+
+    def cmd_status(_args: list[str]) -> None:
+        for key, value in session.status().items():
+            out.write(f"{key}: {value}\n")
+        out.write(f"tools: {', '.join(agent.tools)}\n")
+        out.write(
+            "permissions: "
+            + ", ".join(f"{k}={v.value}" for k, v in sorted(agent.permissions.policy().items()) if k in agent.tools)
+            + "\n"
+        )
+
+    def cmd_clear(_args: list[str]) -> None:
+        loop.run_until_complete(session.clear())
+        renderer.note("(conversation cleared)")
+
+    def cmd_compact(_args: list[str]) -> None:
+        turns_before = len(session.history)
+        compacted = loop.run_until_complete(session.compact())
+        if compacted:
+            renderer.note(f"(conversation compacted: {turns_before} turns -> summary)")
+        else:
+            renderer.note("(nothing to compact)")
+
+    def cmd_permissions(args: list[str]) -> None:
+        if not args:
+            policy = agent.permissions.policy()
+            out.write(f"{'tool':<8}{'decision':<10}session-grant\n")
+            for name in sorted(agent.tools):
+                decision = policy.get(name, Decision.ALLOW)
+                grant = "yes" if agent.permissions.has_session_grant(name) else "-"
+                out.write(f"{name:<8}{decision.value:<10}{grant}\n")
+            return
+        if len(args) != 2:
+            renderer.note("usage: /permissions [<tool> allow|ask|deny]")
+            return
+        tool_name, mode = args
+        if tool_name not in agent.tools:
+            renderer.note(f"unknown tool {tool_name!r}")
+            return
+        before = agent.permissions.policy().get(tool_name, Decision.ALLOW)
+        try:
+            agent.permissions.set_decision(tool_name, mode)
+        except ConfigurationError as exc:
+            renderer.note(f"error: {exc}")
+            return
+        renderer.note(f"({tool_name}: {before.value} -> {mode.lower()} for this session)")
+
+    return {
+        "/help": cmd_help,
+        "/status": cmd_status,
+        "/clear": cmd_clear,
+        "/compact": cmd_compact,
+        "/permissions": cmd_permissions,
+    }
 
 
 def run_interactive(agent: Agent, renderer: Renderer, prompter: ConsolePrompter | None) -> int:
@@ -202,6 +273,7 @@ def run_interactive(agent: Agent, renderer: Renderer, prompter: ConsolePrompter 
     out.flush()
     loop = asyncio.new_event_loop()
     session = agent.new_session()
+    commands = _build_commands(agent, session, renderer, loop)
     last_interrupt = 0.0
     try:
         while True:
@@ -222,21 +294,15 @@ def run_interactive(agent: Agent, renderer: Renderer, prompter: ConsolePrompter 
             if not line:
                 continue
             if line.startswith("/"):
-                command = line.split()[0].lower()
+                parts = line.split()
+                command = parts[0].lower()
                 if command in ("/exit", "/quit"):
                     break
-                if command == "/help":
-                    out.write(HELP + "\n")
-                elif command == "/status":
-                    for key, value in session.status().items():
-                        out.write(f"{key}: {value}\n")
-                    out.write(f"tools: {', '.join(agent.tools)}\n")
-                    out.write("permissions: " + ", ".join(f"{k}={v.value}" for k, v in sorted(agent.permissions.policy().items()) if k in agent.tools) + "\n")
-                elif command == "/clear":
-                    loop.run_until_complete(session.clear())
-                    renderer.note("(conversation cleared)")
-                else:
+                handler = commands.get(command)
+                if handler is None:
                     renderer.note(f"unknown command {command}; try /help")
+                else:
+                    handler(parts[1:])
                 out.flush()
                 continue
             try:

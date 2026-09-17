@@ -90,11 +90,47 @@ def test_interactive_session(meeting_ws):
     out = p.stdout
     assert out.startswith("Kennel v0.0.3\nworkspace: ")
     assert "model: MockModel\nmode: local\ntools: glob, grep, read, write (ask), edit (ask), shell (ask)" in out
-    assert "/clear    forget the conversation" in out
+    assert "/clear" in out and "forget the conversation" in out
+    assert "/compact" in out and "/permissions" in out  # new commands are documented
     assert "turns: 0" in out and "permissions: edit=ask" in out
     assert "● Glob *.md" in out and "answer one" in out
     assert "(conversation cleared)" in out and "answer two" in out
     assert "unknown command /unknown" in out
+
+
+def test_interactive_compact_command(meeting_ws):
+    script = {"turns": ["one", "two", "three"]}
+    stdin = "q1\nq2\n/compact\nq3\n/exit\n"
+    p = run_cli([], meeting_ws, script=script, stdin=stdin)
+    assert p.returncode == 0, p.stderr
+    assert "(conversation compacted: 2 turns -> summary)" in p.stdout
+    assert "three" in p.stdout
+
+
+def test_interactive_compact_noop_when_empty(meeting_ws):
+    p = run_cli([], meeting_ws, script={"turns": []}, stdin="/compact\n/exit\n")
+    assert p.returncode == 0
+    assert "(nothing to compact)" in p.stdout
+
+
+def test_interactive_permissions_table_and_change(meeting_ws):
+    script = {"turns": [[{"tool": "shell", "arguments": {"command": "echo hi"}}, {"text": "done"}]]}
+    stdin = "/permissions\n/permissions shell allow\nrun it\n/exit\n"
+    p = run_cli([], meeting_ws, script=script, stdin=stdin)
+    assert p.returncode == 0, p.stderr
+    out = p.stdout
+    assert "tool" in out and "decision" in out and "session-grant" in out
+    assert f"{'shell':<8}{'ask':<10}" in out  # before the change, from the first /permissions
+    assert "(shell: ask -> allow for this session)" in out
+    assert "● Shell echo hi" in out and "done" in out  # ran instead of being denied
+
+
+def test_interactive_permissions_unknown_tool_and_bad_usage(meeting_ws):
+    stdin = "/permissions nosuch allow\n/permissions shell\n/exit\n"
+    p = run_cli([], meeting_ws, script={"turns": []}, stdin=stdin)
+    assert p.returncode == 0, p.stderr
+    assert "unknown tool 'nosuch'" in p.stdout
+    assert "usage: /permissions" in p.stdout
 
 
 def test_interactive_eof_exits_cleanly(meeting_ws):
