@@ -91,14 +91,26 @@ kennel -p "Read the README and explain this project"   # one-shot
 | Option | Effect |
 | --- | --- |
 | `-p, --prompt TEXT` | run one prompt, print the answer, exit |
-| `--read-only` | only `glob`, `grep`, `read` are available |
-| `--allow-write` | `write` and `edit` run without asking |
+| `--permission-mode MODE` | `read-only`, `default`, `accept-edits`, `dont-ask` or `bypass` |
+| `--read-only` | only `glob`, `grep`, `read` are available (= `--permission-mode read-only`) |
+| `--allow-write` | `write` and `edit` run without asking (= `--permission-mode accept-edits`) |
 | `--allow-shell` | `shell` runs without asking (see Security) |
 | `--allow-web` | enable the `web` tool (asks; needs a configured search provider) |
-| `--non-interactive` | never prompt; anything that would ask is denied |
+| `--non-interactive` | never prompt; anything that would ask is denied (= `--permission-mode dont-ask`) |
 | `--max-tool-calls N` | tool call budget per turn (default 32) |
 | `--verbose` | show tool output sizes and timings |
 | `--trace` | write every agent event as JSON lines to stderr |
+
+The three older flags are sugar for a mode, so `--permission-mode` cannot be combined with
+them. `bypass` allows everything including `shell` and prints a warning line in the header.
+
+| Mode | read tools | `write` / `edit` | `shell` | `web` | Tool set |
+| --- | --- | --- | --- | --- | --- |
+| `read-only` | allow | deny | deny | deny | `glob`, `grep`, `read` only |
+| `default` | allow | ask | ask | deny | all |
+| `accept-edits` | allow | allow | ask | ask | all |
+| `dont-ask` | allow | deny | deny | deny | all |
+| `bypass` | allow | allow | allow | allow | all |
 
 Interactive commands: `/help`, `/status`, `/clear`, `/exit`. `Ctrl-C` cancels the current
 answer (twice at the prompt exits); `Ctrl-D` exits.
@@ -138,19 +150,31 @@ await session.run("Summarize transcripts/2026-09-16.txt")
 await session.run("Now only the TODOs")
 ```
 
-Permissions are per tool (`allow`, `ask`, `deny`); `ask` needs a prompter, otherwise it
-means `deny`:
+Permissions are rules mapped to `allow`, `ask` or `deny`; `ask` needs a prompter, otherwise
+it means `deny`. A rule is a tool name, or a tool name with a specifier the tool interprets —
+the command line for `shell`, the workspace-relative path for the file tools, and the joined
+argument values for a custom tool:
 
 ```python
 from kennel import Agent, Approval
 
-def prompter(request):            # request.summary, request.details (diff / command), request.warnings
-    return Approval.ONCE          # or Approval.SESSION / Approval.DENY
+def prompter(request):            # request.summary, request.details (diff / command),
+    return Approval.ONCE          # request.warnings, request.arguments
 
 agent = Agent(".", tools=["glob", "grep", "read", "write", "edit", "shell"],
-              permissions={"write": "ask", "edit": "ask", "shell": "deny"},
+              permission_mode="accept-edits",     # the defaults rules are layered on
+              permissions={"shell": "ask",
+                           "shell(git *)": "allow",
+                           "shell(git push*)": "deny",
+                           "write(docs/**)": "allow",
+                           "read(**/.env)": "deny"},
               prompter=prompter)
 ```
+
+`deny` always wins, whether it came from `shell` or from `shell(rm *)`. Otherwise a matching
+specifier rule beats the bare tool rule, and `ask` beats `allow` among equally specific
+matches. `permission_mode` is one of `read-only`, `default`, `accept-edits`, `dont-ask`,
+`bypass` (see the table above); `read-only` also restricts the tool set.
 
 Custom tools subclass `kennel.Tool` and are passed alongside built-in names:
 
@@ -212,10 +236,13 @@ approved from the prompt, planned for a later version). All keys are optional.
     "nudge_narration": true,
     "instructions": "Answer in Japanese."
   },
+  "permission_mode": "default",
   "permissions": {
     "write": "ask",
-    "edit": "ask",
-    "shell": "deny"
+    "write(docs/**)": "allow",
+    "shell": "ask",
+    "shell(git *)": "allow",
+    "read(**/.env)": "deny"
   },
   "tools": {
     "read": { "max_lines": 400 },
@@ -261,7 +288,7 @@ Repository layout:
 ```text
 src/kennel/
   agent.py session.py runner.py      Agent, Session, tool runner (guardrails, permissions, events)
-  workspace.py permissions.py         path resolver, permission manager
+  workspace.py permissions.py rules.py  path resolver, permission manager, glob/rule syntax
   registry.py tools/                  tool interface and built-ins (glob grep read write edit shell web)
   providers/                          provider abstraction, AppleProvider, MockProvider
   context.py config.py events.py      chunking/compaction, JSON config, event bus

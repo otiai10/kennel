@@ -12,7 +12,8 @@ permission rules approved from the prompt) with the standard library alone::
         "tools": ["glob", "grep", "read"],
         "instructions": "Answer in Japanese."
       },
-      "permissions": { "write": "ask", "shell": "deny" },
+      "permission_mode": "default",
+      "permissions": { "write": "ask", "shell": "ask", "shell(git *)": "allow" },
       "tools": {
         "max_output_bytes": 65536,
         "read": { "max_lines": 400, "max_file_bytes": 2000000 },
@@ -32,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigurationError
-from .permissions import parse_policy
+from .permissions import PermissionMode, parse_policy
 from .tools.base import ToolLimits
 
 USER_CONFIG_PATH = Path("~/.config/kennel/settings.json").expanduser()
@@ -50,6 +51,7 @@ class KennelConfig:
     grep_max_results: int = 100
     shell_timeout_seconds: int = 30
     nudge_narration: bool = True
+    permission_mode: str | None = None
     permissions: dict[str, str] = field(default_factory=dict)
     tools: list[str] | None = None
     instructions: str | None = None
@@ -124,6 +126,8 @@ def apply_config(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>"
         if not isinstance(agent["instructions"], str):
             raise ConfigurationError(f"{source}: agent.instructions must be a string")
         cfg.instructions = agent["instructions"]
+    if "permission_mode" in data:
+        cfg.permission_mode = PermissionMode.parse(data["permission_mode"]).value
     perms = data.get("permissions", {})
     if not isinstance(perms, dict):
         raise ConfigurationError(f"{source}: 'permissions' must be an object")

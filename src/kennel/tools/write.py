@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from ..errors import ToolExecutionError
 from ..permissions import PermissionKind
+from ..rules import match_path_argument
 from ._fs import atomic_write_text, is_probably_binary, unified_diff
 from .base import Tool, ToolContext, ToolParameter, ToolResult
 
@@ -37,6 +39,10 @@ class WriteTool(Tool):
             old = path.read_text(encoding="utf-8", errors="replace")
             return f"Overwrites existing file {rel} ({len(old.encode())} -> {len(content.encode())} bytes)\n" + unified_diff(old, content, rel)
         return f"Creates new file {rel} ({len(content.encode())} bytes, {content.count(chr(10)) + (0 if content.endswith(chr(10)) or not content else 1)} lines)"
+
+    def match_rule(self, specifier: str, arguments: Mapping[str, Any]) -> bool:
+        """``write(docs/**)``: the specifier is a glob over the workspace-relative path."""
+        return match_path_argument(specifier, arguments)
 
     async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         ws = context.workspace

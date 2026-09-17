@@ -89,7 +89,7 @@ def test_interactive_session(meeting_ws):
     assert p.returncode == 0, p.stderr
     out = p.stdout
     assert out.startswith("Kennel v0.0.3\nworkspace: ")
-    assert "model: MockModel\nmode: local\ntools: glob, grep, read, write (ask), edit (ask), shell (ask)" in out
+    assert "model: MockModel\nmode: local\npermissions: default\ntools: glob, grep, read, write (ask), edit (ask), shell (ask)" in out
     assert "/clear    forget the conversation" in out
     assert "turns: 0" in out and "permissions: edit=ask" in out
     assert "● Glob *.md" in out and "answer one" in out

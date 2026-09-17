@@ -132,15 +132,15 @@ class ToolRunner:
             return "Error: this exact tool call was already made with the same arguments. Do not repeat it; use the earlier result or change the arguments."
 
         pm = self._context.permission_manager
-        if pm.decision_for(name, tool.permission) is not Decision.ALLOW:
+        if pm.decision_for(name, tool.permission, args, tool.match_rule) is not Decision.ALLOW:
             try:
                 details = tool.permission_details(args, self._context)
                 warnings = tool.permission_warnings(args, self._context)
             except KennelError as exc:
                 return self._fail(name, args, summary, exc)
-            request = PermissionRequest(name, tool.permission, summary, details, warnings)
+            request = PermissionRequest(name, tool.permission, summary, details, warnings, dict(args))
             self._emit(EventType.PERMISSION_REQUESTED, tool=name, summary=summary, warnings=list(warnings))
-            if not pm.check(request):
+            if not pm.check(request, matcher=tool.match_rule):
                 self._record(ToolCallRecord(name, args, summary, "denied", error="permission denied"))
                 self._emit(EventType.PERMISSION_DENIED, tool=name, summary=summary)
                 return f"Error: permission denied for {name}. The user did not approve this action; do not retry it, explain what you would have done instead."

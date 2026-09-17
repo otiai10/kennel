@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from ..errors import ToolArgumentError, ToolExecutionError
 from ..permissions import PermissionKind
+from ..rules import match_path_argument
 from ._fs import atomic_write_text, is_probably_binary, unified_diff
 from .base import Tool, ToolContext, ToolParameter, ToolResult
 
@@ -50,6 +52,10 @@ class EditTool(Tool):
     def permission_details(self, arguments: dict[str, Any], context: ToolContext) -> str | None:
         rel, original, updated = self._prepare(arguments, context)
         return unified_diff(original, updated, rel)
+
+    def match_rule(self, specifier: str, arguments: Mapping[str, Any]) -> bool:
+        """``edit(docs/**)``: the specifier is a glob over the workspace-relative path."""
+        return match_path_argument(specifier, arguments)
 
     async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         rel, original, updated = self._prepare(arguments, context)

@@ -13,11 +13,32 @@ destinations whose nearest existing ancestor is outside. Directory listings neve
 symlinks out of the workspace. `.git`, `.venv`, `node_modules` and similar directories are
 skipped by default.
 
-**Permissions.** Each tool has a policy: `allow`, `ask` or `deny`. Defaults are `allow` for
-read-only tools, `ask` for `write`, `edit` and `shell`, `deny` for `web`. `ask` requires an
-interactive prompter; without one (piped stdin, `--non-interactive`, an application that
-did not provide a prompter) it means `deny`. Approvals are per call or per session and are
-never persisted.
+**Permissions.** Every tool call resolves to `allow`, `ask` or `deny`. Rules are written per
+tool (`shell`) or per tool with a specifier (`shell(git *)`, `write(docs/**)`,
+`read(**/.env)`); what a specifier means is decided by the tool (command line for `shell`,
+workspace-relative path for the file tools). **`deny` always wins** — a bare `shell: deny`
+cannot be reopened by `shell(git *): allow`, and a narrow `shell(git push*): deny` overrides
+a broad `shell(git *): allow`. When nothing is denied, a matching specifier rule beats the
+bare tool rule and `ask` beats `allow`.
+
+A permission mode supplies the defaults rules are layered on:
+
+| Mode | read tools | `write` / `edit` | `shell` | `web` | Tool set |
+| --- | --- | --- | --- | --- | --- |
+| `read-only` | allow | deny | deny | deny | `glob`, `grep`, `read` only |
+| `default` | allow | ask | ask | deny | all |
+| `accept-edits` | allow | allow | ask | ask | all |
+| `dont-ask` | allow | deny | deny | deny | all |
+| `bypass` | allow | allow | allow | allow | all |
+
+`ask` requires an interactive prompter; without one (piped stdin, `--non-interactive`, an
+application that did not provide a prompter) it means `deny`. Approvals are per call or per
+session and are never persisted.
+
+`--permission-mode bypass` turns off every prompt, `shell` included. It exists for
+non-interactive runs where the caller has accepted that risk; the CLI prints a warning line
+in the session header (and on stderr in `-p` mode) whenever it is active. Do not use it on a
+workspace you do not fully control.
 
 **Bounded execution.** Tool output is capped (64 KiB by default), reads are line-range
 bounded, `shell` has a timeout and runs without stdin, and each turn has a tool call

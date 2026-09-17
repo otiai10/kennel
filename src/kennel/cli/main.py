@@ -15,7 +15,8 @@ from pathlib import Path
 from .. import __version__
 from ..agent import Agent
 from ..errors import ConfigurationError, KennelError, ModelUnavailableError
-from ..registry import DEFAULT_TOOLS, READ_ONLY_TOOLS
+from ..permissions import PermissionMode
+from ..registry import DEFAULT_TOOLS
 from ..session import AgentResult, Session
 from .renderer import ConsolePrompter, Renderer
 
@@ -31,11 +32,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("workspace", nargs="?", default=".", help="workspace directory (default: current directory)")
     p.add_argument("-p", "--prompt", help="run a single prompt and exit")
-    p.add_argument("--read-only", action="store_true", help="only enable glob, grep and read")
-    p.add_argument("--allow-write", action="store_true", help="allow write and edit without asking")
+    p.add_argument(
+        "--permission-mode",
+        choices=tuple(m.value for m in PermissionMode),
+        default=None,
+        metavar="MODE",
+        help="permission defaults: read-only, default, accept-edits, dont-ask or bypass",
+    )
+    p.add_argument("--read-only", action="store_true", help="only enable glob, grep and read (= --permission-mode read-only)")
+    p.add_argument("--allow-write", action="store_true", help="allow write and edit without asking (= --permission-mode accept-edits)")
     p.add_argument("--allow-shell", action="store_true", help="allow shell without asking (weakens the workspace boundary)")
     p.add_argument("--allow-web", action="store_true", help="enable the web tool (asks; needs a configured search provider)")
-    p.add_argument("--non-interactive", action="store_true", help="never prompt; permissions that would ask are denied")
+    p.add_argument("--non-interactive", action="store_true", help="never prompt; permissions that would ask are denied (= --permission-mode dont-ask)")
     p.add_argument("--max-tool-calls", type=int, default=None, metavar="N", help="tool call limit per turn (default: 32)")
     p.add_argument("--provider", choices=("apple", "mock"), default="apple", help=argparse.SUPPRESS)
     p.add_argument("--verbose", action="store_true", help="show tool result sizes and diagnostics")
@@ -61,18 +69,41 @@ def _make_provider(name: str):
     return AppleProvider()
 
 
-def build_agent(args: argparse.Namespace, prompter: ConsolePrompter | None) -> Agent:
+#: The legacy flags are sugar for a mode, in this precedence order.
+MODE_FLAGS: tuple[tuple[str, PermissionMode], ...] = (
+    ("read_only", PermissionMode.READ_ONLY),
+    ("allow_write", PermissionMode.ACCEPT_EDITS),
+    ("non_interactive", PermissionMode.DONT_ASK),
+)
+
+
+def resolve_mode(args: argparse.Namespace) -> PermissionMode:
+    """Turn --permission-mode and the legacy flags into one mode."""
+    given = [name.replace("_", "-") for name, _ in MODE_FLAGS if getattr(args, name)]
+    if args.permission_mode is not None:
+        if given:
+            raise ConfigurationError(
+                "--permission-mode cannot be combined with " + " or ".join(f"--{name}" for name in given)
+            )
+        return PermissionMode.parse(args.permission_mode)
     if args.read_only and (args.allow_write or args.allow_shell):
         raise ConfigurationError("--read-only cannot be combined with --allow-write or --allow-shell")
-    tools = list(READ_ONLY_TOOLS if args.read_only else DEFAULT_TOOLS)
+    for name, mode in MODE_FLAGS:
+        if getattr(args, name):
+            return mode
+    return PermissionMode.DEFAULT
+
+
+def build_agent(args: argparse.Namespace, prompter: ConsolePrompter | None) -> Agent:
+    mode = resolve_mode(args)
+    tools = list(mode.tools() or DEFAULT_TOOLS)
     permissions: dict[str, str] = {}
-    if args.allow_write:
-        permissions.update(write="allow", edit="allow")
     if args.allow_shell:
         permissions["shell"] = "allow"
     if args.allow_web:
         tools.append("web")
-        permissions["web"] = "ask"
+        if mode is not PermissionMode.BYPASS:
+            permissions["web"] = "ask"
     from ..config import load_config
 
     config = load_config(Path(args.workspace).expanduser()).merged(max_tool_calls=args.max_tool_calls)
@@ -80,6 +111,7 @@ def build_agent(args: argparse.Namespace, prompter: ConsolePrompter | None) -> A
         args.workspace,
         tools=tools,
         permissions=permissions,
+        permission_mode=mode,
         provider=_make_provider(args.provider),
         config=config,
         prompter=prompter,
@@ -97,6 +129,8 @@ def main(argv: list[str] | None = None) -> int:
         agent = build_agent(args, prompter)
         agent.check_availability()
         renderer.attach(agent.events)
+        if agent.permission_mode is PermissionMode.BYPASS and args.prompt is not None:
+            renderer.error(BYPASS_WARNING)  # no header in one-shot mode; warn on stderr
         if args.prompt is not None:
             return run_once(agent, args.prompt, renderer, prompter)
         return run_interactive(agent, renderer, prompter)
@@ -169,21 +203,29 @@ def run_once(agent: Agent, prompt: str, renderer: Renderer, prompter: ConsolePro
         loop.close()
 
 
+BYPASS_WARNING = "! permission mode bypass: every tool runs without asking, including shell and web"
+
+
 def _header(agent: Agent) -> str:
     policy = agent.permissions.policy()
     tools = ", ".join(
         name if policy.get(name, "allow") == "allow" else f"{name} ({policy[name].value})"
         for name in agent.tools
     )
+    rules = ", ".join(f"{rule.key}={rule.decision.value}" for rule in agent.permissions.rules())
     info = agent.provider.info
-    return (
-        f"Kennel v{__version__}\n"
-        f"workspace: {agent.workspace.root}\n"
-        f"model: {info.model}\n"
-        f"mode: {info.mode}\n"
-        f"tools: {tools}\n"
-        "Type /help for commands, /exit or Ctrl-D to quit."
-    )
+    lines = [
+        f"Kennel v{__version__}",
+        f"workspace: {agent.workspace.root}",
+        f"model: {info.model}",
+        f"mode: {info.mode}",
+        f"permissions: {agent.permission_mode.value}" + (f" ({rules})" if rules else ""),
+        f"tools: {tools}",
+    ]
+    if agent.permission_mode is PermissionMode.BYPASS:
+        lines.append(BYPASS_WARNING)
+    lines.append("Type /help for commands, /exit or Ctrl-D to quit.")
+    return "\n".join(lines)
 
 
 HELP = """Commands:
@@ -231,7 +273,10 @@ def run_interactive(agent: Agent, renderer: Renderer, prompter: ConsolePrompter 
                     for key, value in session.status().items():
                         out.write(f"{key}: {value}\n")
                     out.write(f"tools: {', '.join(agent.tools)}\n")
-                    out.write("permissions: " + ", ".join(f"{k}={v.value}" for k, v in sorted(agent.permissions.policy().items()) if k in agent.tools) + "\n")
+                    out.write(f"permission_mode: {agent.permission_mode.value}\n")
+                    entries = [f"{k}={v.value}" for k, v in sorted(agent.permissions.policy().items()) if k in agent.tools]
+                    entries += [f"{r.key}={r.decision.value}" for r in agent.permissions.rules()]
+                    out.write("permissions: " + ", ".join(entries) + "\n")
                 elif command == "/clear":
                     loop.run_until_complete(session.clear())
                     renderer.note("(conversation cleared)")

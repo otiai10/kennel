@@ -5,11 +5,13 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from ..errors import ToolArgumentError, ToolExecutionError
 from ..permissions import PermissionKind
+from ..rules import match_path_argument
 from ._fs import is_probably_binary, iter_files, matches_glob
 from .base import Tool, ToolContext, ToolParameter, ToolResult
 
@@ -40,6 +42,10 @@ class GrepTool(Tool):
         if arguments.get("path") and arguments["path"] not in (".", "./"):
             parts.append(f"in {arguments['path']}")
         return " ".join(parts)
+
+    def match_rule(self, specifier: str, arguments: Mapping[str, Any]) -> bool:
+        """``grep(src/**)``: the specifier is a glob over the search root (default ``.``)."""
+        return match_path_argument(specifier, arguments, default=".")
 
     async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         pattern = arguments["pattern"]

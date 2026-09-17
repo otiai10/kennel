@@ -18,7 +18,15 @@ from .errors import (
     WorkspaceEscapeError,
 )
 from .events import Event, EventBus, EventType
-from .permissions import Approval, Decision, PermissionKind, PermissionManager, PermissionRequest
+from .permissions import (
+    Approval,
+    Decision,
+    PermissionKind,
+    PermissionManager,
+    PermissionMode,
+    PermissionRequest,
+    PermissionRule,
+)
 from .providers.base import ModelProvider, ProviderInfo, ProviderSession
 from .providers.mock import MockProvider
 from .runner import ToolCallRecord
@@ -47,7 +55,9 @@ __all__ = [
     "PermissionDeniedError",
     "PermissionKind",
     "PermissionManager",
+    "PermissionMode",
     "PermissionRequest",
+    "PermissionRule",
     "ProviderError",
     "ProviderInfo",
     "ProviderSession",
