@@ -41,22 +41,22 @@ Install straight from GitHub. The recommended way is an isolated tool install wi
 or pipx, which puts a `kennel` command on your PATH:
 
 ```bash
-uv tool install --with "apple-fm-sdk==0.2.0" "git+https://github.com/otiai10/kennel"
+uv tool install "git+https://github.com/otiai10/kennel"
 # or
-pipx install "git+https://github.com/otiai10/kennel" --pip-args "apple-fm-sdk==0.2.0"
+pipx install "git+https://github.com/otiai10/kennel"
 kennel --help
 ```
 
 To try it without installing:
 
 ```bash
-uvx --from "git+https://github.com/otiai10/kennel" --with "apple-fm-sdk==0.2.0" kennel --help
+uvx --from "git+https://github.com/otiai10/kennel" kennel --help
 ```
 
 Plain pip into an existing environment works too. Pin a tag or branch with `@v0.0.1` at the end of the URL.
 
 ```bash
-pip install "git+https://github.com/otiai10/kennel" "apple-fm-sdk==0.2.0"
+pip install "git+https://github.com/otiai10/kennel"
 ```
 
 For development, use an editable install:
@@ -64,14 +64,14 @@ For development, use an editable install:
 ```bash
 git clone https://github.com/otiai10/kennel && cd kennel
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-pip install "apple-fm-sdk==0.2.0"
+pip install -e ".[dev]"    # or: uv sync --extra dev
 kennel --help
 ```
 
-> **Why pin `apple-fm-sdk==0.2.0`?** Version 0.2.1 references APIs that only exist in the
-> macOS 27 SDK shipped with Xcode 27. With Xcode 26.x the Swift bridge fails to compile.
-> Once you have a matching Xcode, `pip install "kennel[apple]"` picks the newest SDK.
+> **About the `apple-fm-sdk<0.2.1` pin.** The SDK has no wheels; installing it builds a Swift
+> bridge with your Xcode. Version 0.2.1 references APIs that only exist in the macOS 27 SDK
+> shipped with Xcode 27, so with Xcode 26.x it fails to compile. The upper bound will be
+> lifted once a matching Xcode is common.
 
 Check that the model is usable:
 
@@ -241,7 +241,7 @@ is not a security boundary.
 ## Development
 
 ```bash
-pip install -e ".[dev]" && pip install "apple-fm-sdk==0.2.0"
+pip install -e ".[dev]"
 ruff check src tests examples
 pytest                                   # unit, provider (MockProvider) and CLI tests; no model needed
 KENNEL_APPLE_TESTS=1 pytest -m apple     # Apple integration tests, on a capable Mac only

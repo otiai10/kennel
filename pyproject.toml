@@ -21,13 +21,13 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-# Core has no third-party runtime dependency. The Apple provider needs apple-fm-sdk.
-dependencies = []
+# apple-fm-sdk 0.2.1 needs the macOS 27 SDK (Xcode 27); with Xcode 26.x its Swift bridge
+# fails to build. Lift the upper bound once a matching Xcode is common.
+dependencies = [
+    "apple-fm-sdk>=0.2.0,<0.2.1",
+]
 
 [project.optional-dependencies]
-# NOTE: apple-fm-sdk 0.2.1 fails to build with Xcode 26.x (needs the macOS 27 SDK).
-# Pin 0.2.0 until a matching Xcode is installed: pip install "apple-fm-sdk==0.2.0"
-apple = ["apple-fm-sdk>=0.2.0"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
 
 [project.scripts]
