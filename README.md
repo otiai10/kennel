@@ -53,7 +53,7 @@ To try it without installing:
 uvx --from "git+https://github.com/otiai10/kennel" --with "apple-fm-sdk==0.2.0" kennel --help
 ```
 
-Plain pip into an existing environment works too. Pin a tag or branch with `@v0.1.0` at the end of the URL.
+Plain pip into an existing environment works too. Pin a tag or branch with `@v0.0.1` at the end of the URL.
 
 ```bash
 pip install "git+https://github.com/otiai10/kennel" "apple-fm-sdk==0.2.0"
