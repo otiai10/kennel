@@ -9,7 +9,7 @@ event stream, and a CLI. Everything runs on your Mac; nothing leaves it by defau
 ```text
 $ kennel ~/meetings
 
-Kennel v0.1.0
+Kennel v0.0.1
 workspace: /Users/me/meetings
 model: Apple SystemLanguageModel
 mode: local
@@ -264,6 +264,6 @@ spikes/                               Phase 0 SDK experiments (not production co
 
 ## Status
 
-v0.1.0. Read-only agent, permission-gated mutation tools, CLI, MockProvider-based test
+v0.0.1. Read-only agent, permission-gated mutation tools, CLI, MockProvider-based test
 suite, structured meeting summary example. Not yet: web search provider, persistent
 sessions, alternative models, MCP, subagents, sandboxed shell.
