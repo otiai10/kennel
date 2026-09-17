@@ -163,6 +163,8 @@ class Session:
             except KennelError as exc:
                 self._emit(EventType.SESSION_FAILED, error=str(exc))
                 raise
+            except BrokenPipeError:
+                raise  # the consumer's output went away; not a model failure
             except Exception as exc:  # noqa: BLE001 - provider bug surfaced as a KennelError
                 self._emit(EventType.SESSION_FAILED, error=str(exc))
                 raise ProviderError(f"The model request failed: {exc}") from exc

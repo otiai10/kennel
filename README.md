@@ -190,7 +190,7 @@ agent = Agent(".", provider=AppleProvider(deterministic=True))
 ("I'll run grep for that", "which file should I check?") instead of taking them. When a
 turn ends with no tool call and the answer looks like that, Kennel re-prompts once inside
 the same session to carry the steps out; the CLI shows `↻ carrying out the described
-steps`. Set `nudge_narration = false` under `[agent]` in `kennel.toml` to turn it off.
+steps`. Set `"nudge_narration": false` under `"agent"` in `kennel.json` to turn it off.
 
 Structured output for application use goes through `ProviderSession.respond_structured`
 (Apple guided generation). `examples/meeting_summary.py` shows the reference workflow:
@@ -199,28 +199,30 @@ that are not in the transcript stay `None`.
 
 ## Configuration
 
-Precedence: CLI flags > `Agent(...)` arguments > `./kennel.toml` > `~/.config/kennel/config.toml` > defaults.
+Precedence: CLI flags > `Agent(...)` arguments > `./kennel.json` > `~/.config/kennel/settings.json` > defaults.
 
-```toml
-[agent]
-max_tool_calls = 32
-turn_timeout_seconds = 300
-nudge_narration = true
-instructions = "Answer in Japanese."
+Config files are JSON so that Kennel can write settings back (for example permission rules
+approved from the prompt, planned for a later version). All keys are optional.
 
-[permissions]
-write = "ask"
-edit = "ask"
-shell = "deny"
-
-[tools.read]
-max_lines = 400
-
-[tools.grep]
-max_results = 100
-
-[tools.shell]
-timeout_seconds = 30
+```json
+{
+  "agent": {
+    "max_tool_calls": 32,
+    "turn_timeout_seconds": 300,
+    "nudge_narration": true,
+    "instructions": "Answer in Japanese."
+  },
+  "permissions": {
+    "write": "ask",
+    "edit": "ask",
+    "shell": "deny"
+  },
+  "tools": {
+    "read": { "max_lines": 400 },
+    "grep": { "max_results": 100 },
+    "shell": { "timeout_seconds": 30 }
+  }
+}
 ```
 
 ## Local-first contract
@@ -262,7 +264,7 @@ src/kennel/
   workspace.py permissions.py         path resolver, permission manager
   registry.py tools/                  tool interface and built-ins (glob grep read write edit shell web)
   providers/                          provider abstraction, AppleProvider, MockProvider
-  context.py config.py events.py      chunking/compaction, TOML config, event bus
+  context.py config.py events.py      chunking/compaction, JSON config, event bus
   cli/                                argparse CLI and renderer
 tests/{unit,providers,e2e,integration}
 examples/                             meeting_summary.py, repo_qa.py

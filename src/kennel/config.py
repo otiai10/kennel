@@ -1,38 +1,32 @@
 """Configuration with precedence: CLI flags > Python arguments > project config > user config > defaults.
 
-Config files are TOML::
+Config files are JSON (``./kennel.json`` in the workspace, ``~/.config/kennel/settings.json``
+for the user). JSON was chosen so that Kennel itself can write settings back (for example
+permission rules approved from the prompt) with the standard library alone::
 
-    [agent]
-    max_tool_calls = 32
-    turn_timeout_seconds = 300
-    nudge_narration = true   # re-prompt once when the model describes tool steps instead of taking them
-    tools = ["glob", "grep", "read"]
-    instructions = "Answer in Japanese."
-
-    [permissions]
-    write = "ask"
-    shell = "deny"
-
-    [tools]
-    max_output_bytes = 65536
-
-    [tools.read]
-    max_lines = 400
-    max_file_bytes = 2000000
-
-    [tools.grep]
-    max_results = 100
-
-    [tools.glob]
-    max_results = 500
-
-    [tools.shell]
-    timeout_seconds = 30
+    {
+      "agent": {
+        "max_tool_calls": 32,
+        "turn_timeout_seconds": 300,
+        "nudge_narration": true,
+        "tools": ["glob", "grep", "read"],
+        "instructions": "Answer in Japanese."
+      },
+      "permissions": { "write": "ask", "shell": "deny" },
+      "tools": {
+        "max_output_bytes": 65536,
+        "read": { "max_lines": 400, "max_file_bytes": 2000000 },
+        "grep": { "max_results": 100 },
+        "glob": { "max_results": 500 },
+        "shell": { "timeout_seconds": 30 }
+      }
+    }
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -41,13 +35,8 @@ from .errors import ConfigurationError
 from .permissions import parse_policy
 from .tools.base import ToolLimits
 
-try:
-    import tomllib
-except ImportError:  # Python 3.10
-    import tomli as tomllib  # type: ignore[no-redef]
-
-USER_CONFIG_PATH = Path("~/.config/kennel/config.toml").expanduser()
-PROJECT_CONFIG_NAME = "kennel.toml"
+USER_CONFIG_PATH = Path("~/.config/kennel/settings.json").expanduser()
+PROJECT_CONFIG_NAME = "kennel.json"
 
 
 @dataclass
@@ -102,10 +91,12 @@ _INT_KEYS = {
 }
 
 
-def apply_toml(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>") -> KennelConfig:
+def apply_config(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>") -> KennelConfig:
     cfg = dataclasses.replace(cfg, permissions=dict(cfg.permissions), sources=list(cfg.sources))
     agent = data.get("agent", {})
     tools = data.get("tools", {})
+    if not isinstance(agent, dict) or not isinstance(tools, dict):
+        raise ConfigurationError(f"{source}: 'agent' and 'tools' must be objects")
     sections = {"agent": agent, "tools": tools}
     for name in ("read", "grep", "glob", "shell"):
         sections[f"tools.{name}"] = tools.get(name, {}) if isinstance(tools, dict) else {}
@@ -113,42 +104,45 @@ def apply_toml(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>") 
         if key in sections[section]:
             value = sections[section][key]
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ConfigurationError(f"{source}: [{section}] {key} must be a positive integer")
+                raise ConfigurationError(f"{source}: {section}.{key} must be a positive integer")
             setattr(cfg, attr, value)
     if "turn_timeout_seconds" in agent:
         value = agent["turn_timeout_seconds"]
         if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0):
-            raise ConfigurationError(f"{source}: [agent] turn_timeout_seconds must be a positive number")
+            raise ConfigurationError(f"{source}: agent.turn_timeout_seconds must be a positive number")
         cfg.turn_timeout_seconds = float(value) if value is not None else None
     if "nudge_narration" in agent:
         if not isinstance(agent["nudge_narration"], bool):
-            raise ConfigurationError(f"{source}: [agent] nudge_narration must be true or false")
+            raise ConfigurationError(f"{source}: agent.nudge_narration must be true or false")
         cfg.nudge_narration = agent["nudge_narration"]
     if "tools" in agent:
         value = agent["tools"]
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-            raise ConfigurationError(f"{source}: [agent] tools must be a list of tool names")
+            raise ConfigurationError(f"{source}: agent.tools must be a list of tool names")
         cfg.tools = list(value)
     if "instructions" in agent:
         if not isinstance(agent["instructions"], str):
-            raise ConfigurationError(f"{source}: [agent] instructions must be a string")
+            raise ConfigurationError(f"{source}: agent.instructions must be a string")
         cfg.instructions = agent["instructions"]
     perms = data.get("permissions", {})
     if not isinstance(perms, dict):
-        raise ConfigurationError(f"{source}: [permissions] must be a table")
+        raise ConfigurationError(f"{source}: 'permissions' must be an object")
     cfg.permissions.update({k: d.value for k, d in parse_policy(perms).items()})
     cfg.sources.append(source)
     return cfg
 
 
-def read_toml(path: Path) -> dict[str, Any]:
+def read_config_file(path: Path) -> dict[str, Any]:
     try:
-        with open(path, "rb") as fh:
-            return tomllib.load(fh)
-    except tomllib.TOMLDecodeError as exc:
-        raise ConfigurationError(f"{path}: invalid TOML: {exc}") from exc
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError(f"{path}: invalid JSON: {exc}") from exc
     except OSError as exc:
         raise ConfigurationError(f"{path}: cannot read config: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigurationError(f"{path}: top level must be a JSON object")
+    return data
 
 
 def load_config(
@@ -159,9 +153,9 @@ def load_config(
 ) -> KennelConfig:
     cfg = KennelConfig()
     if user_config is not None and user_config.is_file():
-        cfg = apply_toml(cfg, read_toml(user_config), str(user_config))
+        cfg = apply_config(cfg, read_config_file(user_config), str(user_config))
     if workspace is not None:
         project = Path(workspace) / project_config_name
         if project.is_file():
-            cfg = apply_toml(cfg, read_toml(project), str(project))
+            cfg = apply_config(cfg, read_config_file(project), str(project))
     return cfg

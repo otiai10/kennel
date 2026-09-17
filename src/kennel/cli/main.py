@@ -49,8 +49,12 @@ def _make_provider(name: str):
         from ..providers.mock import MockProvider
 
         script = os.environ.get("KENNEL_MOCK_SCRIPT", "")
-        if script and Path(script).is_file():
-            script = Path(script).read_text(encoding="utf-8")
+        looks_like_path = script and not script.lstrip().startswith("{") and len(script) < 1024
+        if looks_like_path:
+            try:
+                script = Path(script).read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ConfigurationError(f"KENNEL_MOCK_SCRIPT: cannot read {script!r}: {exc}") from exc
         return MockProvider.from_json(script or "{}")
     from ..providers.apple import AppleProvider
 
@@ -109,6 +113,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except KeyboardInterrupt:
         return 130
+    except BrokenPipeError:
+        # stdout was closed (e.g. `kennel ... | head`): finish quietly.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except OSError:
+            pass
+        return 0
 
 
 def _run_turn(loop: asyncio.AbstractEventLoop, session: Session, prompt: str, renderer: Renderer, prompter: ConsolePrompter | None) -> AgentResult | None:

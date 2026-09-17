@@ -108,7 +108,7 @@ def test_workspace_missing(tmp_path):
 
 
 def test_project_config_is_applied(meeting_ws):
-    (meeting_ws / "kennel.toml").write_text('[permissions]\nwrite = "allow"\n[agent]\nmax_tool_calls = 2\n')
+    (meeting_ws / "kennel.json").write_text(json.dumps({"permissions": {"write": "allow"}, "agent": {"max_tool_calls": 2}}))
     p = run_cli(["-p", "x"], meeting_ws)
     assert p.returncode == 0, p.stderr
     assert "tool call limit (2 per turn) reached" in p.stdout
@@ -151,3 +151,17 @@ def test_permission_prompt_on_tty(meeting_ws):
     assert "Allow Write: Write ok.md" in text and "Creates new file ok.md" in text
     assert "● Write ok.md" in text and "wrote it" in text
     assert (meeting_ws / "ok.md").read_text() == "yes\n"
+
+
+def test_closed_stdout_exits_quietly(meeting_ws):
+    """`kennel ... | head` must not print a traceback when the pipe closes."""
+    e = {**os.environ, "NO_COLOR": "1", "KENNEL_MOCK_SCRIPT": json.dumps({"turns": ["x" * 20000]})}
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "kennel.cli.main", str(meeting_ws), "--provider", "mock", "-p", "go"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=e,
+    )
+    proc.stdout.read(10)
+    proc.stdout.close()
+    _, err = proc.communicate(timeout=60)
+    assert proc.returncode == 0, err
+    assert b"Traceback" not in err and b"Broken pipe" not in err
