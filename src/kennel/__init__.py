@@ -19,10 +19,10 @@ from .errors import (
 )
 from .events import Event, EventBus, EventType
 from .permissions import Approval, Decision, PermissionKind, PermissionManager, PermissionRequest
-from .providers.base import ModelProvider, ProviderInfo, ProviderSession
+from .providers.base import ModelProvider, ProviderInfo, ProviderSession, Usage
 from .providers.mock import MockProvider
 from .runner import ToolCallRecord
-from .session import AgentResult, Session, Usage
+from .session import AgentResult, ContextUsage, Session
 from .tools.base import Tool, ToolContext, ToolLimits, ToolParameter, ToolResult
 from .workspace import Workspace
 
@@ -34,6 +34,7 @@ __all__ = [
     "Approval",
     "ConfigurationError",
     "ContextLimitError",
+    "ContextUsage",
     "DEFAULT_INSTRUCTIONS",
     "Decision",
     "Event",

@@ -156,6 +156,8 @@ def run_once(agent: Agent, prompt: str, renderer: Renderer, prompter: ConsolePro
     try:
         result = _run_turn(loop, session, prompt, renderer, prompter)
         renderer.finish_answer()
+        if renderer.verbose:
+            renderer.note(f"(context: {session.context_usage().summary()})")
         if result is None:
             return 130
         if result.stop_reason == "timeout":
@@ -167,6 +169,14 @@ def run_once(agent: Agent, prompt: str, renderer: Renderer, prompter: ConsolePro
     finally:
         loop.run_until_complete(session.close())
         loop.close()
+
+
+def _usage_lines(session: Session) -> str:
+    u = session.context_usage()
+    window = "unknown" if u.window_tokens is None else f"{u.window_tokens} tokens"
+    used = f"{u.used_tokens} tokens" + (" (estimated)" if u.estimated else " (reported by the provider)")
+    ratio = "n/a" if u.window_tokens is None else f"{u.ratio:.0%}"
+    return f"window: {window}\nused: {used}\ncontext: {ratio}\nturns: {u.turns}\ncompactions: {u.compactions}\n"
 
 
 def _header(agent: Agent) -> str:
@@ -189,6 +199,7 @@ def _header(agent: Agent) -> str:
 HELP = """Commands:
   /help     show this help
   /status   show session, model and tool status
+  /usage    show how full the model's context window is
   /clear    forget the conversation
   /exit     leave (also /quit or Ctrl-D)
 Ctrl-C cancels the current answer; press it twice at the prompt to exit."""
@@ -232,6 +243,8 @@ def run_interactive(agent: Agent, renderer: Renderer, prompter: ConsolePrompter 
                         out.write(f"{key}: {value}\n")
                     out.write(f"tools: {', '.join(agent.tools)}\n")
                     out.write("permissions: " + ", ".join(f"{k}={v.value}" for k, v in sorted(agent.permissions.policy().items()) if k in agent.tools) + "\n")
+                elif command == "/usage":
+                    out.write(_usage_lines(session))
                 elif command == "/clear":
                     loop.run_until_complete(session.clear())
                     renderer.note("(conversation cleared)")
@@ -245,6 +258,8 @@ def run_interactive(agent: Agent, renderer: Renderer, prompter: ConsolePrompter 
                 renderer.error(str(exc))
                 continue
             renderer.finish_answer()
+            if renderer.verbose:
+                renderer.note(f"(context: {session.context_usage().summary()})")
             if result is not None and result.stop_reason == "tool_limit":
                 renderer.note("(tool call limit reached; answer may be incomplete)")
             elif result is not None and result.stop_reason == "timeout":

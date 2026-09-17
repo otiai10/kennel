@@ -100,8 +100,21 @@ kennel -p "Read the README and explain this project"   # one-shot
 | `--verbose` | show tool output sizes and timings |
 | `--trace` | write every agent event as JSON lines to stderr |
 
-Interactive commands: `/help`, `/status`, `/clear`, `/exit`. `Ctrl-C` cancels the current
-answer (twice at the prompt exits); `Ctrl-D` exits.
+Interactive commands: `/help`, `/status`, `/usage`, `/clear`, `/exit`. `Ctrl-C` cancels the
+current answer (twice at the prompt exits); `Ctrl-D` exits.
+
+The on-device model's context window is about 4k tokens, which is the tightest constraint in
+practice, so `/usage` shows how full it is. With `--verbose` the same line is printed after
+every answer:
+
+```text
+> /usage
+window: 4096 tokens
+used: 504 tokens (estimated)
+context: 12%
+turns: 1
+compactions: 0
+```
 
 Every tool call is shown as one line (`● Read transcripts/2026-09-16.txt [1-50]`). Mutations
 ask first:
@@ -130,13 +143,34 @@ asyncio.run(main())
 ```
 
 `Agent.run()` returns an `AgentResult` (`text`, `stop_reason`, `tool_calls`, `usage`,
-`session_id`). Multi-turn conversations use a session:
+`session_id`). `usage` is a `Usage` (`input_tokens`, `output_tokens`, `estimated`); on the
+on-device model it is estimated, because the SDK exposes no token counter. Multi-turn
+conversations use a session:
 
 ```python
 session = agent.new_session()
 await session.run("Summarize transcripts/2026-09-16.txt")
 await session.run("Now only the TODOs")
 ```
+
+Because the window is small, `Session.context_usage()` tells you how much of it is left
+before you decide how big the next chunk should be:
+
+```python
+u = session.context_usage()
+u.window_tokens     # 4096 on Apple's on-device model; None if the provider declares none
+u.used_tokens       # what the live provider session holds right now
+u.ratio             # 0.0-1.0 (0.0 when no window is declared)
+u.estimated         # True when Kennel estimated it from text rather than being told
+u.turns, u.compactions
+print(u.summary())  # "12% of 4096 tokens (504 tokens, estimated)"
+```
+
+`used_tokens` counts what is *in the live provider session*: the instructions plus the turns
+since it was opened. Compacting the conversation replaces that session with a summarized one,
+so the number drops — which is what makes it useful as a budget. A provider that counts tokens
+itself can implement `ProviderSession.usage()` and the reported figure is used instead, with
+`estimated` False.
 
 Permissions are per tool (`allow`, `ask`, `deny`); `ask` needs a prompter, otherwise it
 means `deny`:

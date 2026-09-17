@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from .context import HistoryTurn, compact_history, looks_like_tool_narration
+from .context import (
+    HistoryTurn,
+    compact_history,
+    estimate_tokens,
+    estimate_tokens_from_bytes,
+    looks_like_tool_narration,
+)
 from .errors import ContextLimitError, KennelError, ProviderError
 from .events import EventType
-from .providers.base import ProviderSession
+from .providers.base import ProviderSession, Usage
 from .runner import ToolCallRecord, ToolRunner
 
 if TYPE_CHECKING:
@@ -19,9 +26,28 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class Usage:
-    input_tokens: int | None = None
-    output_tokens: int | None = None
+class ContextUsage:
+    """How much of the model's context window the live conversation occupies.
+
+    ``used_tokens`` counts what is actually in the current provider session:
+    the instructions (including a compaction summary, when there is one) plus the
+    turns since that session was opened. Compacting therefore lowers it, which is
+    the point of showing it.
+    """
+
+    window_tokens: int | None
+    used_tokens: int
+    ratio: float  # 0.0-1.0; 0.0 when the provider declares no window
+    estimated: bool
+    turns: int
+    compactions: int
+
+    def summary(self) -> str:
+        """One line for the CLI: ``12% of 4096 tokens (504 tokens, estimated)``."""
+        detail = f"{self.used_tokens} tokens" + (", estimated" if self.estimated else "")
+        if self.window_tokens is None:
+            return f"{detail}, window unknown"
+        return f"{self.ratio:.0%} of {self.window_tokens} tokens ({detail})"
 
 
 @dataclass
@@ -55,6 +81,8 @@ class Session:
         self.history: list[Turn] = []
         self.compactions = 0
         self._provider_session: ProviderSession | None = None
+        self._window_instructions = agent.instructions
+        self._window_turn_start = 0
         self._started = False
         self._failed = False
         self.runner = ToolRunner(
@@ -82,6 +110,10 @@ class Session:
                 tools=list(self.agent.tools.values()),
                 invoke=self.runner.invoke,
             )
+            # What the live window holds, for context_usage(): these instructions
+            # plus whatever turns follow. Earlier turns are only in the summary.
+            self._window_instructions = instructions
+            self._window_turn_start = len(self.history)
         return self._provider_session
 
     async def _drop_provider(self) -> None:
@@ -102,6 +134,8 @@ class Session:
         await self._drop_provider()
         self.history.clear()
         self.compactions = 0
+        self._window_instructions = self.agent.instructions
+        self._window_turn_start = 0
 
     def status(self) -> dict[str, Any]:
         return {
@@ -111,8 +145,38 @@ class Session:
             "compactions": self.compactions,
             "model": self.agent.provider.info.model,
             "mode": self.agent.provider.info.mode,
+            "context": self.context_usage().summary(),
             "workspace": str(self.agent.workspace.root),
         }
+
+    def context_usage(self) -> ContextUsage:
+        """Report how full the model's context window is right now.
+
+        Uses the provider's own count when it has one
+        (:meth:`~kennel.ProviderSession.usage`) and falls back to estimating from
+        the text in the live provider session, in which case ``estimated`` is True.
+        """
+        window = self.agent.provider.info.context_window_tokens
+        measured = self._reported_usage()
+        if measured is not None:
+            used = (measured.input_tokens or 0) + (measured.output_tokens or 0)
+            estimated = measured.estimated
+        else:
+            used, estimated = math.ceil(self._estimate_window_tokens()), True
+        ratio = min(1.0, used / window) if window else 0.0
+        return ContextUsage(window, used, ratio, estimated, len(self.history), self.compactions)
+
+    def _reported_usage(self) -> Usage | None:
+        """What the live provider session counted, when the provider counts at all."""
+        return self._provider_session.usage() if self._provider_session is not None else None
+
+    def _estimate_window_tokens(self) -> float:
+        """Estimate the tokens held by the live provider session (see :class:`ContextUsage`)."""
+        total = estimate_tokens(self._window_instructions)
+        for turn in self.history[self._window_turn_start :]:
+            total += estimate_tokens(turn.prompt) + estimate_tokens(turn.response)
+            total += sum(estimate_tokens_from_bytes(c.output_bytes) for c in turn.tool_calls)
+        return total
 
     # -- running --------------------------------------------------------------
 
@@ -185,7 +249,18 @@ class Session:
         records = self.runner.turn_records()
         self.history.append(Turn(prompt, text, stop_reason, records))
         self._emit(EventType.MODEL_COMPLETED, stop_reason=stop_reason, chars=len(text), tool_calls=len(records))
-        return AgentResult(text=text, stop_reason=stop_reason, tool_calls=records, usage=None, session_id=self.id)
+        usage = self._turn_usage(prompt, text, records)
+        return AgentResult(text=text, stop_reason=stop_reason, tool_calls=records, usage=usage, session_id=self.id)
+
+    def _turn_usage(self, prompt: str, text: str, records: list[ToolCallRecord]) -> Usage:
+        """The provider's count for this turn, or an estimate marked as such."""
+        measured = self._reported_usage()
+        if measured is not None:
+            return measured
+        sent = estimate_tokens(prompt) + sum(estimate_tokens_from_bytes(c.output_bytes) for c in records)
+        return Usage(
+            input_tokens=math.ceil(sent), output_tokens=math.ceil(estimate_tokens(text)), estimated=True
+        )
 
     def _should_nudge(self, text: str) -> bool:
         if not self.agent.tools or not self.agent.config.nudge_narration:

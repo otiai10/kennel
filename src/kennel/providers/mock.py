@@ -15,7 +15,7 @@ from typing import Any
 
 from ..errors import ModelUnavailableError, ProviderError
 from ..tools.base import Tool
-from .base import ModelProvider, ProviderInfo, ProviderSession, ToolInvoker
+from .base import ModelProvider, ProviderInfo, ProviderSession, ToolInvoker, Usage
 
 
 @dataclass
@@ -85,13 +85,14 @@ class MockSession(ProviderSession):
             raise ProviderError("MockProvider has no structured responses left")
         return self.provider._structured.pop(0)
 
+    def usage(self) -> Usage | None:
+        return self.provider.reported_usage
+
     async def close(self) -> None:
         self.closed = True
 
 
 class MockProvider(ModelProvider):
-    info = ProviderInfo(name="mock", model="MockModel", mode="local")
-
     def __init__(
         self,
         turns: Sequence[Turn] | None = None,
@@ -99,11 +100,19 @@ class MockProvider(ModelProvider):
         structured: Sequence[dict[str, Any]] | None = None,
         available: bool = True,
         chunk_size: int = 8,
+        context_window_tokens: int | None = 4096,
+        reported_usage: Usage | None = None,
     ) -> None:
+        """``context_window_tokens=None`` mimics a provider that declares no window;
+        ``reported_usage`` mimics one that counts tokens itself."""
         self._turns: list[Turn] = list(turns or [])
         self._structured: list[dict[str, Any]] = list(structured or [])
         self.available = available
         self.chunk_size = chunk_size
+        self.reported_usage = reported_usage
+        self.info = ProviderInfo(
+            name="mock", model="MockModel", mode="local", context_window_tokens=context_window_tokens
+        )
         self.sessions: list[MockSession] = []
 
     def _next_turn(self) -> Turn | None:
