@@ -17,6 +17,7 @@ from ..agent import Agent
 from ..errors import ConfigurationError, KennelError, ModelUnavailableError
 from ..registry import DEFAULT_TOOLS, READ_ONLY_TOOLS
 from ..session import AgentResult, Session
+from .output import FORMATS, JsonOutput
 from .renderer import ConsolePrompter, Renderer
 
 PROMPT = "> "
@@ -38,6 +39,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--non-interactive", action="store_true", help="never prompt; permissions that would ask are denied")
     p.add_argument("--max-tool-calls", type=int, default=None, metavar="N", help="tool call limit per turn (default: 32)")
     p.add_argument("--provider", choices=("apple", "mock"), default="apple", help=argparse.SUPPRESS)
+    p.add_argument(
+        "--output-format",
+        choices=FORMATS,
+        default="text",
+        metavar="FORMAT",
+        help="stdout format for -p: text (default), json (one result object), stream-json (one JSON per line)",
+    )
     p.add_argument("--verbose", action="store_true", help="show tool result sizes and diagnostics")
     p.add_argument("--trace", action="store_true", help="write every agent event as JSON to stderr")
     p.add_argument("--version", action="version", version=f"kennel {__version__}")
@@ -89,28 +97,37 @@ def build_agent(args: argparse.Namespace, prompter: ConsolePrompter | None) -> A
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
-    color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+    machine = args.output_format != "text"
+    # In a machine format stdout is JSON only, so anything human (including the
+    # permission prompt) moves to stderr.
+    human = sys.stderr if machine else sys.stdout
+    color = human.isatty() and not os.environ.get("NO_COLOR")
     interactive_permissions = sys.stdin.isatty() and not args.non_interactive
-    prompter = ConsolePrompter(color=color) if interactive_permissions else None
-    renderer = Renderer(verbose=args.verbose, trace=args.trace, color=color)
+    prompter = ConsolePrompter(out=human, color=color) if interactive_permissions else None
+    renderer = Renderer(verbose=args.verbose, trace=args.trace, color=color, quiet=machine)
+    # Only established once the flag itself is valid: until then errors are plain text.
+    json_out: JsonOutput | None = None
     try:
+        if machine:
+            if args.prompt is None:
+                raise ConfigurationError(f"--output-format {args.output_format} needs -p/--prompt")
+            json_out = JsonOutput(args.output_format)
         agent = build_agent(args, prompter)
         agent.check_availability()
         renderer.attach(agent.events)
+        if json_out is not None:
+            json_out.attach(agent.events)
         if args.prompt is not None:
-            return run_once(agent, args.prompt, renderer, prompter)
+            return run_once(agent, args.prompt, renderer, prompter, json_out)
         return run_interactive(agent, renderer, prompter)
     except ModelUnavailableError as exc:
-        renderer.error(str(exc))
-        return 3
+        return _fail(renderer, json_out, str(exc), 3)
     except ConfigurationError as exc:
-        renderer.error(str(exc))
-        return 2
+        return _fail(renderer, json_out, str(exc), 2)
     except KennelError as exc:
-        renderer.error(str(exc))
         if args.verbose:
             traceback.print_exc()
-        return 1
+        return _fail(renderer, json_out, str(exc), 1)
     except KeyboardInterrupt:
         return 130
     except BrokenPipeError:
@@ -122,11 +139,32 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
 
-def _run_turn(loop: asyncio.AbstractEventLoop, session: Session, prompt: str, renderer: Renderer, prompter: ConsolePrompter | None) -> AgentResult | None:
+def _fail(renderer: Renderer, json_out: JsonOutput | None, message: str, code: int) -> int:
+    """Report an error on stderr and, in a machine format, as a result record."""
+    renderer.error(message)
+    if json_out is not None:
+        json_out.error(message)
+    return code
+
+
+def _run_turn(
+    loop: asyncio.AbstractEventLoop,
+    session: Session,
+    prompt: str,
+    renderer: Renderer,
+    prompter: ConsolePrompter | None,
+    json_out: JsonOutput | None = None,
+) -> AgentResult | None:
     """Run one turn on ``loop``; Ctrl-C cancels the turn and returns None."""
     if prompter is not None:
         prompter.reset()
-    task = loop.create_task(session.run(prompt, on_delta=renderer.delta))
+
+    def on_delta(text: str) -> None:
+        renderer.delta(text)
+        if json_out is not None:
+            json_out.delta(text)
+
+    task = loop.create_task(session.run(prompt, on_delta=on_delta))
 
     def on_sigint() -> None:
         if prompter is not None:
@@ -150,23 +188,29 @@ def _run_turn(loop: asyncio.AbstractEventLoop, session: Session, prompt: str, re
             pass
 
 
-def run_once(agent: Agent, prompt: str, renderer: Renderer, prompter: ConsolePrompter | None) -> int:
+def run_once(agent: Agent, prompt: str, renderer: Renderer, prompter: ConsolePrompter | None, json_out: JsonOutput | None = None) -> int:
     loop = asyncio.new_event_loop()
     session = agent.new_session()
     try:
-        result = _run_turn(loop, session, prompt, renderer, prompter)
+        result = _run_turn(loop, session, prompt, renderer, prompter, json_out)
         renderer.finish_answer()
+        code = 0
         if result is None:
-            return 130
-        if result.stop_reason == "timeout":
+            code = 130
+        elif result.stop_reason == "timeout":
             renderer.error("the model did not finish within the turn timeout")
-            return 1
-        if result.stop_reason == "tool_limit":
+            code = 1
+        elif result.stop_reason == "tool_limit":
             renderer.note("(tool call limit reached; answer may be incomplete)")
-        return 0
     finally:
-        loop.run_until_complete(session.close())
+        loop.run_until_complete(session.close())  # the closing events precede the result line
         loop.close()
+    if json_out is not None:
+        if result is None:
+            json_out.error("the turn was cancelled", stop_reason="cancelled")
+        else:
+            json_out.result(result)
+    return code
 
 
 def _header(agent: Agent) -> str:

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .context import HistoryTurn, compact_history, looks_like_tool_narration
@@ -26,11 +27,39 @@ class Usage:
 
 @dataclass
 class AgentResult:
+    """The outcome of one turn. :meth:`to_dict` is the machine-readable form.
+
+    ``is_error`` marks a turn that did not produce a usable answer (a timeout, or
+    an error the caller turned into a result). ``tool_limit`` is not an error: the
+    answer is there, only possibly incomplete.
+    """
+
     text: str
     stop_reason: str  # end_turn | tool_limit | timeout
     tool_calls: list[ToolCallRecord]
     usage: Usage | None
     session_id: str
+    duration_ms: float = 0.0
+    is_error: bool = False
+    structured_output: dict[str, Any] | None = None
+    compactions: int = 0
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """A JSON-serializable result record (schema: ``docs/output-format.md``)."""
+        return {
+            "type": "result",
+            "text": self.text,
+            "stop_reason": self.stop_reason,
+            "is_error": self.is_error,
+            "error": self.error,
+            "duration_ms": round(self.duration_ms, 3),
+            "session_id": self.session_id,
+            "tool_calls": [asdict(call) for call in self.tool_calls],
+            "usage": asdict(self.usage) if self.usage is not None else None,
+            "structured_output": self.structured_output,
+            "compactions": self.compactions,
+        }
 
 
 @dataclass
@@ -134,6 +163,7 @@ class Session:
             )
         self.runner.begin_turn()
         self._emit(EventType.MODEL_STARTED, prompt_chars=len(prompt))
+        started = time.perf_counter()
         stop_reason = "end_turn"
         text = ""
         attempt = 0
@@ -185,7 +215,16 @@ class Session:
         records = self.runner.turn_records()
         self.history.append(Turn(prompt, text, stop_reason, records))
         self._emit(EventType.MODEL_COMPLETED, stop_reason=stop_reason, chars=len(text), tool_calls=len(records))
-        return AgentResult(text=text, stop_reason=stop_reason, tool_calls=records, usage=None, session_id=self.id)
+        return AgentResult(
+            text=text,
+            stop_reason=stop_reason,
+            tool_calls=records,
+            usage=None,
+            session_id=self.id,
+            duration_ms=(time.perf_counter() - started) * 1000,
+            is_error=stop_reason == "timeout",
+            compactions=self.compactions,
+        )
 
     def _should_nudge(self, text: str) -> bool:
         if not self.agent.tools or not self.agent.config.nudge_narration:

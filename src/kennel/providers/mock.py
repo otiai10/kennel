@@ -3,6 +3,9 @@
 A ``MockProvider`` is scripted per turn. Each turn is a plain string, a list of
 steps (:class:`ToolCall`, :class:`Text`, :class:`Raise`, :class:`Sleep`), or an
 async callable ``(prompt, invoke) -> str``.
+
+:meth:`MockProvider.from_json` reads the same script from JSON (``KENNEL_MOCK_SCRIPT``):
+``{"turns": [...], "structured": [...], "available": false}``.
 """
 
 from __future__ import annotations
@@ -137,4 +140,4 @@ class MockProvider(ModelProvider):
                 elif "sleep" in step:
                     steps.append(Sleep(float(step["sleep"])))
             turns.append(steps)
-        return cls(turns, structured=obj.get("structured"))
+        return cls(turns, structured=obj.get("structured"), available=bool(obj.get("available", True)))
