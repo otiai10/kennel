@@ -36,7 +36,7 @@ def test_json_prints_a_single_result_object(meeting_ws):
     assert result["duration_ms"] > 0
     assert len(result["session_id"]) == 12
     assert result["text"].endswith("Unresolved: release notes owner.")
-    assert result["compactions"] == 0 and result["usage"]["estimated"] is True and result["structured_output"] is None
+    assert result["compactions"] == 0 and result["usage"] is None and result["structured_output"] is None
     names = [call["name"] for call in result["tool_calls"]]
     assert names == ["glob", "read", "read", "write"]
     assert [c["status"] for c in result["tool_calls"]] == ["ok", "ok", "error", "denied"]
@@ -125,7 +125,7 @@ def test_to_dict_is_json_serializable_with_every_tool_call_field():
     assert json.loads(json.dumps(payload)) == payload
     assert set(payload) == RESULT_KEYS
     assert payload["duration_ms"] == 12.346  # rounded to milliseconds
-    assert payload["usage"] == {"input_tokens": 10, "output_tokens": 2, "estimated": False}
+    assert payload["usage"] == {"input_tokens": 10, "output_tokens": 2}
     assert payload["tool_calls"][0] == {
         "name": "read",
         "arguments": {"path": "a.txt"},

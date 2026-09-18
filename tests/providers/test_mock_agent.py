@@ -39,8 +39,7 @@ async def test_final_response_only(meeting_ws):
     agent, provider, events = make_agent(meeting_ws, ["Just an answer."])
     result = await agent.run("hi")
     assert result.text == "Just an answer." and result.stop_reason == "end_turn"
-    assert result.tool_calls == [] and len(result.session_id) == 12
-    assert result.usage == Usage(input_tokens=1, output_tokens=4, estimated=True)  # "hi" / 15 chars
+    assert result.tool_calls == [] and result.usage is None and len(result.session_id) == 12
     types = [e.type for e in events]
     assert types == [EventType.SESSION_STARTED, EventType.MODEL_STARTED, EventType.MODEL_COMPLETED, EventType.SESSION_COMPLETED]
     assert events[0].data["tools"] == ["edit", "glob", "grep", "read", "shell", "write"]
@@ -610,20 +609,20 @@ async def test_apple_provider_declares_the_on_device_window():
     assert AppleProvider().info.context_window_tokens == 4096  # no SDK import needed
 
 
-async def test_agent_result_usage_is_filled(meeting_ws):
+async def test_agent_result_usage_stays_none_without_a_counting_provider(meeting_ws):
+    """Kennel never estimates per turn: usage is the provider's count or nothing."""
     agent, _, _ = make_agent(meeting_ws, [[ToolCall("glob", {"pattern": "**/*.txt"}), Text("答えは以下の通りです")]])
     result = await agent.run("最新の議事録を要約して")
-    assert result.usage is not None and result.usage.estimated is True
-    assert result.usage.input_tokens > 0  # prompt plus the tool output bytes
-    assert result.usage.output_tokens > 0
+    assert result.usage is None
+    assert not hasattr(Usage(), "estimated")  # only ContextUsage says whether it estimated
 
 
-async def test_reported_usage_wins_over_the_estimate(meeting_ws):
+async def test_reported_usage_fills_agent_result_and_context_usage(meeting_ws):
     reported = Usage(input_tokens=1200, output_tokens=300)
     agent, _, _ = make_agent(meeting_ws, ["done"], reported_usage=reported)
     session = agent.new_session()
     result = await session.run("q1")
-    assert result.usage == reported and result.usage.estimated is False
+    assert result.usage == reported
     usage = session.context_usage()
     assert usage.used_tokens == 1500 and usage.estimated is False
     assert usage.ratio == pytest.approx(1500 / 4096)

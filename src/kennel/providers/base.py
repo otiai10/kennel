@@ -22,11 +22,16 @@ ToolInvoker = Callable[[str, dict[str, Any]], Awaitable[str]]
 
 @dataclass
 class Usage:
-    """Tokens a request consumed. ``estimated`` marks a Kennel-side approximation."""
+    """Tokens a request consumed, as counted by the provider itself.
+
+    Kennel never fills this in by estimating: a provider that does not count
+    tokens leaves ``AgentResult.usage`` as ``None``. For a rough picture of how
+    full the window is, use :meth:`kennel.Session.context_usage` instead, which
+    says whether its numbers are estimated.
+    """
 
     input_tokens: int | None = None
     output_tokens: int | None = None
-    estimated: bool = False
 
 
 @dataclass(frozen=True)
