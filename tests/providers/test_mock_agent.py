@@ -243,6 +243,25 @@ async def test_custom_tool_and_extra_instructions(meeting_ws):
     assert [t.name for t in provider.sessions[0].tools] == ["read", "shout"]
 
 
+async def test_system_prompt_replaces_default_instructions(meeting_ws):
+    agent, provider, _ = make_agent(meeting_ws, ["ok"], system_prompt="You are a release-notes bot.")
+    await agent.run("x")
+    instructions = provider.sessions[0].instructions
+    assert instructions.startswith("You are a release-notes bot.")
+    assert "You are Kennel" not in instructions
+    assert str(meeting_ws.resolve()) in instructions  # workspace overview still included by default
+
+
+async def test_system_prompt_without_workspace_overview(meeting_ws):
+    agent, provider, _ = make_agent(
+        meeting_ws, ["ok"], system_prompt="Bare prompt.", include_workspace_overview=False
+    )
+    await agent.run("x")
+    instructions = provider.sessions[0].instructions
+    assert instructions == "Bare prompt."
+    assert "Top-level entries" not in instructions
+
+
 async def test_empty_prompt_and_unavailable(meeting_ws):
     from kennel import ModelUnavailableError
 

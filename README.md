@@ -97,6 +97,9 @@ kennel -p "Read the README and explain this project"   # one-shot
 | `--allow-shell` | `shell` runs without asking (see Security) |
 | `--allow-web` | enable the `web` tool (asks; needs a configured search provider) |
 | `--non-interactive` | never prompt; anything that would ask is denied (= `--permission-mode dont-ask`) |
+| `--instructions TEXT\|@FILE` | append text (or a file's contents) to the default instructions |
+
+| `--system-prompt TEXT\|@FILE` | replace the default instructions entirely (or a file's contents) |
 | `--max-tool-calls N` | tool call budget per turn (default 32) |
 | `--output-format FORMAT` | with `-p`: `text` (default), `json`, `stream-json` |
 | `--json-schema TEXT\|@FILE` | with `-p`: answer under a JSON schema (guided generation) |
@@ -369,7 +372,16 @@ consumers that would rather `async for` than register a callback.
 
 The default instructions tell the model to glob, then grep/read, then answer, and include a
 one-line overview of the workspace's top-level entries. On the on-device model this is what
-makes tool use reliable, especially for non-English prompts. `AppleProvider(deterministic=True)`
+makes tool use reliable, especially for non-English prompts.
+
+`Agent(instructions=...)` (or `--instructions` / `kennel.json`'s `agent.instructions`) appends
+to those default instructions and is the safe way to add a house rule ("Answer in Japanese").
+`Agent(system_prompt=...)` (or `--system-prompt` / `agent.system_prompt`) **replaces** the
+default instructions outright; the workspace overview is still appended unless
+`include_workspace_overview=False`. Replacing the default instructions removes the
+glob-then-read procedure that keeps the on-device model calling tools instead of guessing, so
+tool use can become unreliable — only do this if your own instructions cover that ground.
+`AppleProvider(deterministic=True)`
 switches to greedy sampling so a given prompt yields the same trace and answer every run,
 which is what you want for evaluations:
 

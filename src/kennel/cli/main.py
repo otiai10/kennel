@@ -46,6 +46,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-shell", action="store_true", help="allow shell without asking (weakens the workspace boundary)")
     p.add_argument("--allow-web", action="store_true", help="enable the web tool (asks; needs a configured search provider)")
     p.add_argument("--non-interactive", action="store_true", help="never prompt; permissions that would ask are denied (= --permission-mode dont-ask)")
+    p.add_argument(
+        "--instructions",
+        metavar="TEXT|@FILE",
+        help="append text to the default instructions (or @path/to/file to read it from a file)",
+    )
+    p.add_argument(
+        "--system-prompt",
+        metavar="TEXT|@FILE",
+        help="replace the default instructions entirely (or @path/to/file); "
+        "the model may become less reliable at using tools without them",
+    )
     p.add_argument("--max-tool-calls", type=int, default=None, metavar="N", help="tool call limit per turn (default: 32)")
     p.add_argument("--provider", choices=("apple", "mock"), default="apple", help=argparse.SUPPRESS)
     p.add_argument(
@@ -81,6 +92,19 @@ def _make_provider(name: str):
     from ..providers.apple import AppleProvider
 
     return AppleProvider()
+
+
+def _resolve_text_or_file(value: str | None, workspace: str, flag: str) -> str | None:
+    """Return ``value`` as-is, or the contents of the file it points to if it starts with ``@``."""
+    if value is None or not value.startswith("@"):
+        return value
+    path = Path(value[1:]).expanduser()
+    if not path.is_absolute():
+        path = Path(workspace).expanduser() / path
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigurationError(f"{flag}: cannot read {path}: {exc}") from exc
 
 
 def load_schema(value: str | None) -> dict | None:
@@ -140,7 +164,13 @@ def build_agent(args: argparse.Namespace, prompter: ConsolePrompter | None) -> A
             permissions["web"] = "ask"
     from ..config import load_config
 
-    config = load_config(Path(args.workspace).expanduser()).merged(max_tool_calls=args.max_tool_calls)
+    instructions = _resolve_text_or_file(args.instructions, args.workspace, "--instructions")
+    system_prompt = _resolve_text_or_file(args.system_prompt, args.workspace, "--system-prompt")
+    config = load_config(Path(args.workspace).expanduser()).merged(
+        max_tool_calls=args.max_tool_calls,
+        instructions=instructions,
+        system_prompt=system_prompt,
+    )
     return Agent(
         args.workspace,
         tools=tools,
