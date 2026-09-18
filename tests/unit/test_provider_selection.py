@@ -64,9 +64,11 @@ def test_options_of_other_providers_are_ignored(meeting_ws: Path, fake_provider:
 
 
 def test_an_instance_beats_the_config(meeting_ws: Path):
+    from kennel.providers.apple import AppleProvider  # constructing it does not need the SDK
+
     _write_config(meeting_ws, {"provider": "mock"})
-    agent = Agent(meeting_ws, provider=FakeProvider())
-    assert isinstance(agent.provider, ModelProvider) and agent.provider.info.name == "fake"
+    agent = Agent(meeting_ws, provider=AppleProvider())
+    assert isinstance(agent.provider, ModelProvider) and agent.provider.info.name == "apple"
 
 
 def test_a_name_is_resolved_by_the_registry(meeting_ws: Path):
