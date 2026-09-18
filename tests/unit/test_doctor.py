@@ -1,9 +1,28 @@
-"""Unit tests for the kennel.cli.doctor checks (issue #10)."""
+"""Unit tests for the kennel.cli.doctor checks (issues #10, #35)."""
 
 import json
 from pathlib import Path
 
-from kennel.cli.doctor import render_json, render_text, run_checks
+import pytest
+
+from kennel.cli.doctor import Check, render_json, render_text, run_checks
+from kennel.providers.registry import _SPECS, ProviderSpec, register
+
+
+@pytest.fixture
+def fake_provider():
+    """A third-party provider with its own doctor check (issue #35)."""
+    register(
+        ProviderSpec(
+            "fake",
+            lambda **_: None,
+            lambda **options: [Check("fake model", True, f"fake ready (options={sorted(options)})")],
+        )
+    )
+    try:
+        yield "fake"
+    finally:
+        _SPECS.pop("fake", None)
 
 
 def test_mock_provider_checks_pass(meeting_ws: Path, tmp_path: Path):
@@ -13,16 +32,15 @@ def test_mock_provider_checks_pass(meeting_ws: Path, tmp_path: Path):
     assert names == [
         "python",
         "platform",
-        "apple_fm_sdk",
-        "model availability",
+        "provider",
         "xcode",
         "user config",
         "project config",
         "workspace",
         "effective config",
-    ]
-    apple_sdk = next(c for c in checks if c.name == "apple_fm_sdk")
-    assert "skipped" in apple_sdk.detail
+    ]  # the apple-only checks belong to the apple provider now
+    provider = next(c for c in checks if c.name == "provider")
+    assert provider.detail == "provider mock"
     effective = next(c for c in checks if c.name == "effective config")
     assert "tools=" in effective.detail and "permissions=" in effective.detail
 
@@ -61,3 +79,27 @@ def test_render_text_marks_ok_and_failing_checks(meeting_ws: Path, tmp_path: Pat
     assert text.startswith("Kennel ")
     assert "✓" in text and "✗" not in text
     assert "effective: tools=" in text
+
+
+def test_registered_provider_contributes_its_own_checks(meeting_ws: Path, tmp_path: Path, fake_provider: str):
+    checks = run_checks(str(meeting_ws), "fake", user_config=tmp_path / "nope-settings.json")
+    by_name = {c.name: c for c in checks}
+    assert by_name["provider"].detail == "provider fake"
+    assert by_name["fake model"].ok and "fake ready" in by_name["fake model"].detail
+    assert all(c.ok for c in checks)
+
+
+def test_provider_comes_from_the_config_when_no_flag_is_given(meeting_ws: Path, tmp_path: Path, fake_provider: str):
+    (meeting_ws / "kennel.json").write_text(json.dumps({"provider": "fake", "providers": {"fake": {"port": 8080}}}))
+    checks = run_checks(str(meeting_ws), user_config=tmp_path / "nope-settings.json")
+    by_name = {c.name: c for c in checks}
+    assert by_name["provider"].detail == "provider fake"
+    assert "port" in by_name["fake model"].detail  # the configured options reach the checks
+
+
+def test_unknown_provider_fails_only_the_provider_check(meeting_ws: Path, tmp_path: Path):
+    checks = run_checks(str(meeting_ws), "nope", user_config=tmp_path / "nope-settings.json")
+    by_name = {c.name: c for c in checks}
+    assert by_name["provider"].ok is False
+    assert "mock" in by_name["provider"].detail  # the registered names are listed
+    assert by_name["python"].ok and by_name["workspace"].ok and by_name["effective config"].ok
