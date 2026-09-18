@@ -34,6 +34,9 @@ from .permissions import (
 )
 from .providers.base import ModelProvider, ProviderInfo, ProviderSession, Usage
 from .providers.mock import MockProvider
+from .providers.registry import ProviderSpec
+from .providers.registry import create as create_provider
+from .providers.registry import register as register_provider
 from .runner import ToolCallRecord
 from .session import AgentResult, ContextUsage, Session
 from .tools.base import Tool, ToolContext, ToolLimits, ToolParameter, ToolResult
@@ -73,6 +76,7 @@ __all__ = [
     "ProviderError",
     "ProviderInfo",
     "ProviderSession",
+    "ProviderSpec",
     "Session",
     "SessionError",
     "Tool",
@@ -91,5 +95,7 @@ __all__ = [
     "Workspace",
     "WorkspaceError",
     "WorkspaceEscapeError",
+    "create_provider",
     "load_config",
+    "register_provider",
 ]
