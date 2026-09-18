@@ -171,13 +171,13 @@ def build_agent(args: argparse.Namespace, prompter: ConsolePrompter | None) -> A
     config = load_config(Path(args.workspace).expanduser()).merged(
         max_tool_calls=args.max_tool_calls,
         instructions=instructions,
-        system_prompt=system_prompt,
     )
     return Agent(
         args.workspace,
         tools=tools,
         permissions=permissions,
         permission_mode=mode,
+        system_prompt=system_prompt,
         provider=_make_provider(args.provider),
         config=config,
         prompter=prompter,

@@ -274,6 +274,15 @@ async def test_system_prompt_replaces_default_instructions(meeting_ws):
     assert str(meeting_ws.resolve()) in instructions  # workspace overview still included by default
 
 
+async def test_system_prompt_argument_beats_project_config(meeting_ws):
+    (meeting_ws / "kennel.json").write_text('{"agent": {"system_prompt": "project prompt"}}')
+    agent, _, _ = make_agent(meeting_ws, ["ok"], system_prompt="argument prompt")
+    assert agent.instructions.startswith("argument prompt")
+    assert "project prompt" not in agent.instructions
+    fallback, _, _ = make_agent(meeting_ws, ["ok"])
+    assert fallback.instructions.startswith("project prompt")  # config still applies when no argument
+
+
 async def test_system_prompt_without_workspace_overview(meeting_ws):
     agent, provider, _ = make_agent(
         meeting_ws, ["ok"], system_prompt="Bare prompt.", include_workspace_overview=False
