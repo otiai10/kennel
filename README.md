@@ -280,6 +280,67 @@ specifier rule beats the bare tool rule, and `ask` beats `allow` among equally s
 matches. `permission_mode` is one of `read-only`, `default`, `accept-edits`, `dont-ask`,
 `bypass` (see the table above); `read-only` also restricts the tool set.
 
+### Hooks
+
+Events report what happened; hooks decide what happens. An application embedding Kennel can
+stop a tool call, correct its arguments, replace a result, or add context to a prompt —
+without subclassing anything. Callbacks may be sync or async:
+
+```python
+from kennel import Agent, Allow, Deny, HookMatcher, Hooks, ToolResult
+
+async def guard(call, ctx):                    # before_tool: runs before the permission check
+    if "curl" in call.arguments.get("command", ""):
+        return Deny("network access is not allowed in this workspace")
+    return None                                # None means "no opinion"
+
+def cap_reads(call, ctx):
+    return Allow(updated_arguments={**call.arguments, "end_line": 100})
+
+def redact(call, result, ctx):                 # after_tool: return a ToolResult to replace it
+    return ToolResult(result.content.replace(SECRET, "***"))
+
+def add_context(prompt, session):              # before_prompt: appended to what the model sees
+    return "Today is 2026-09-18."
+
+agent = Agent(".", hooks=Hooks(
+    before_tool=[guard, HookMatcher(tools=["read"], hooks=[cap_reads])],
+    after_tool=[redact],
+    before_prompt=[add_context],
+))
+agent.hooks.before_tool.append(another_guard)   # also fine after construction
+```
+
+- `before_tool(call, ctx)` runs after the arguments are validated and **before** the
+  permission check, so a policy can deny what the permission policy would have allowed.
+  `Deny` records the call as `blocked`, emits `tool.blocked` and returns the message to the
+  model; `Allow(updated_arguments=...)` re-validates and continues; `Allow(remember="session")`
+  grants the tool for the session.
+- `after_tool(call, result, ctx)` may return a `ToolResult` to replace the result. The
+  replacement is bounded by the same output limit.
+- `before_prompt(prompt, session)` returns text appended to the prompt sent to the model.
+  The conversation history keeps the user's own words, and Kennel's internal re-prompts
+  (the narration guard) are not passed through the hook.
+- `HookMatcher(tools=[...], hooks=[...])` restricts hooks to named tools.
+- A hook that raises fails the tool call (`status="error"`). A broken policy is an error,
+  not an absence of policy — unlike an event subscriber, whose exceptions are only logged.
+- `ctx` is a `HookContext` carrying the `session_id`, the `tool` and the same `ToolContext`
+  the tool will run with (`ctx.workspace`, `ctx.permissions`, `ctx.environment`). Hooks run
+  on the provider's tool thread, so they get plain data and thread-safe services only, and
+  they must not hold anything bound to another event loop.
+
+The prompter can answer with more than an `Approval` too:
+
+```python
+def prompter(request):
+    if request.tool_name == "shell":
+        return Deny(message="shell is disabled for this workspace; use the file tools")
+    return Allow(remember="session")           # or Approval.ONCE / SESSION / DENY
+```
+
+`Deny.message` is what the model is told, so make it actionable; `Allow(updated_arguments=)`
+corrects the call before it runs.
+
 Custom tools subclass `kennel.Tool` and are passed alongside built-in names:
 
 ```python
@@ -297,18 +358,14 @@ class ListMeetings(Tool):
 agent = Agent(".", tools=["read", ListMeetings()])
 ```
 
-Events (`session.started`, `tool.started`, `tool.completed`, `permission.requested`,
-`model.delta`, ...) are available through `agent.events.subscribe(callback)`; the CLI
-renderer is just one subscriber. Events carry summaries and sizes, never file contents.
-`Session.stream()` is the async-iterator view of the same events, for consumers that would
-rather `async for` than register a callback.
-
 Events (`session.started`, `session.completed`, `session.failed`, `session.cancelled`,
 `model.started`, `model.delta`, `model.completed`, `model.nudged`, `tool.requested`,
-`tool.started`, `tool.completed`, `tool.failed`, `permission.requested`,
+`tool.started`, `tool.completed`, `tool.failed`, `tool.blocked`, `permission.requested`,
 `permission.denied`, `context.compacted`) are available through
 `agent.events.subscribe(callback)`; the CLI renderer is just one subscriber. Events carry
-summaries and sizes, never file contents.
+summaries and sizes, never file contents. Subscribers only observe — to intervene, use
+hooks (above). `Session.stream()` is the async-iterator view of the same events, for
+consumers that would rather `async for` than register a callback.
 
 The default instructions tell the model to glob, then grep/read, then answer, and include a
 one-line overview of the workspace's top-level entries. On the on-device model this is what
@@ -410,7 +467,8 @@ Repository layout:
 
 ```text
 src/kennel/
-  agent.py session.py runner.py      Agent, Session, tool runner (guardrails, permissions, events)
+  agent.py session.py runner.py      Agent, Session, tool runner (guardrails, hooks, permissions, events)
+  hooks.py                           before_tool / after_tool / before_prompt callbacks
   workspace.py permissions.py rules.py  path resolver, permission manager, glob/rule syntax
   registry.py tools/                  tool interface and built-ins (glob grep read write edit shell web)
   providers/                          provider abstraction, AppleProvider, MockProvider

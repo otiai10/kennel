@@ -40,6 +40,21 @@ non-interactive runs where the caller has accepted that risk; the CLI prints a w
 in the session header (and on stderr in `-p` mode) whenever it is active. Do not use it on a
 workspace you do not fully control.
 
+**Application hooks.** An embedding application can register `before_tool` hooks that run
+after argument validation and **before** the permission check, so an application policy can
+deny calls the permission policy would allow (`kennel.Hooks`). Through their return value,
+hooks only tighten: an `Allow` still goes through the normal permission check, and the only
+thing it can skip is the interactive prompt (`Allow(remember="session")` — the same grant
+the user could give from the prompt). Hook-rewritten arguments are re-validated and still
+resolved through the workspace boundary. A hook that raises fails the tool call rather than
+being ignored, so a crashing policy cannot silently disable itself.
+
+Hooks are application code running in the same process, not a confined extension point.
+`HookContext` hands them the live `PermissionManager` and the `Tool`, so a hook *can* widen
+the policy (`ctx.permissions.set_decision(...)`) or call `tool.execute()` directly and
+bypass this file's guarantees. That is the same trust level as the application's own code;
+do not load hooks you would not paste into your own `main()`.
+
 **Bounded execution.** Tool output is capped (64 KiB by default), reads are line-range
 bounded, `shell` has a timeout and runs without stdin, and each turn has a tool call
 budget plus repeated-call detection.

@@ -20,6 +20,7 @@ from .context import (
 )
 from .errors import ContextLimitError, KennelError, ProviderError, TurnCancelledError
 from .events import Event, EventType
+from .hooks import run_hook
 from .providers.base import ProviderSession, Usage
 from .runner import ToolCallRecord, ToolRunner
 
@@ -125,6 +126,7 @@ class Session:
             agent.events,
             self.id,
             max_tool_calls=agent.config.max_tool_calls,
+            hooks=agent.hooks,
         )
 
     # -- lifecycle ------------------------------------------------------------
@@ -297,14 +299,17 @@ class Session:
         text = ""
         attempt = 0
         timeout = self.agent.config.turn_timeout_seconds
+        # before_prompt applies to what the user asked, not to Kennel's own
+        # re-prompts, and the history keeps the user's words.
+        sent = await self._apply_before_prompt(prompt)
         structured: dict[str, Any] | None = None
 
         async def generate() -> str:
             nonlocal structured
             if schema is None:
-                return await self._generate(prompt, on_delta)
+                return await self._generate(sent, on_delta)
             provider = await self._provider(self._compaction_note())
-            data = await provider.respond_structured(prompt, schema)
+            data = await provider.respond_structured(sent, schema)
             structured = data
             # Guided generation arrives whole, so the answer is one delta.
             answer = json.dumps(data, ensure_ascii=False, indent=2)
@@ -443,6 +448,17 @@ class Session:
         return Usage(
             input_tokens=math.ceil(sent), output_tokens=math.ceil(estimate_tokens(text)), estimated=True
         )
+
+    async def _apply_before_prompt(self, prompt: str) -> str:
+        """Append whatever the ``before_prompt`` hooks add to the prompt (additional context)."""
+        if not self.agent.hooks.before_prompt:
+            return prompt
+        extra: list[str] = []
+        for hook in list(self.agent.hooks.before_prompt):
+            added = await run_hook(hook, prompt, self)
+            if added:
+                extra.append(str(added).strip())
+        return "\n\n".join([prompt, *extra]) if extra else prompt
 
     def _should_nudge(self, text: str) -> bool:
         if not self.agent.tools or not self.agent.config.nudge_narration:

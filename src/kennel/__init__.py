@@ -19,12 +19,16 @@ from .errors import (
     WorkspaceEscapeError,
 )
 from .events import Event, EventBus, EventType
+from .hooks import HookContext, HookMatcher, Hooks, ToolCallRequest
 from .permissions import (
+    Allow,
     Approval,
     Decision,
+    Deny,
     PermissionKind,
     PermissionManager,
     PermissionMode,
+    PermissionOutcome,
     PermissionRequest,
     PermissionRule,
 )
@@ -40,15 +44,20 @@ __version__ = "0.0.3"
 __all__ = [
     "Agent",
     "AgentResult",
+    "Allow",
     "Approval",
     "ConfigurationError",
     "ContextLimitError",
     "ContextUsage",
     "DEFAULT_INSTRUCTIONS",
     "Decision",
+    "Deny",
     "Event",
     "EventBus",
     "EventType",
+    "HookContext",
+    "HookMatcher",
+    "Hooks",
     "KennelConfig",
     "KennelError",
     "MockProvider",
@@ -58,6 +67,7 @@ __all__ = [
     "PermissionKind",
     "PermissionManager",
     "PermissionMode",
+    "PermissionOutcome",
     "PermissionRequest",
     "PermissionRule",
     "ProviderError",
@@ -68,6 +78,7 @@ __all__ = [
     "Tool",
     "ToolArgumentError",
     "ToolCallRecord",
+    "ToolCallRequest",
     "ToolContext",
     "ToolError",
     "ToolExecutionError",

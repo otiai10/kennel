@@ -11,6 +11,12 @@ A :class:`PermissionMode` supplies the defaults that rules are layered on top of
 so ``read-only`` / ``default`` / ``accept-edits`` / ``dont-ask`` / ``bypass`` can
 be named instead of spelled out per tool.
 
+A prompter answers with an :class:`Approval` for the simple cases, or with
+:class:`Allow` / :class:`Deny` when it wants to say more: a reason the model
+should see, or corrected arguments. The same two types are what application
+hooks return (:mod:`kennel.hooks`), so there is one vocabulary for "may this
+call proceed" no matter who answers.
+
 This layer is a usability/safety control, not an OS sandbox: an allowed
 ``shell`` tool can bypass the file tools' workspace boundary.
 """
@@ -128,6 +134,31 @@ DEFAULT_MODE = PermissionMode.DEFAULT
 
 
 @dataclass(frozen=True)
+class Allow:
+    """Let the call proceed, optionally with corrected arguments.
+
+    ``updated_arguments`` replaces the call's arguments (they are re-validated).
+    ``remember="session"`` grants the tool for the rest of the session, like
+    :attr:`Approval.SESSION`.
+    """
+
+    updated_arguments: Mapping[str, Any] | None = None
+    remember: str | None = None
+
+    @property
+    def remember_session(self) -> bool:
+        return self.remember == "session"
+
+
+@dataclass(frozen=True)
+class Deny:
+    """Stop the call. ``message`` is what the model is told, so make it actionable."""
+
+    message: str
+    interrupt: bool = False
+
+
+@dataclass(frozen=True)
 class PermissionRequest:
     tool_name: str
     kind: PermissionKind
@@ -153,7 +184,16 @@ class PermissionRule:
         return self.tool_name if self.specifier is None else f"{self.tool_name}({self.specifier})"
 
 
-Prompter = Callable[[PermissionRequest], Approval]
+@dataclass(frozen=True)
+class PermissionOutcome:
+    """The resolved answer for one call, richer than a bool."""
+
+    allowed: bool
+    message: str | None = None
+    updated_arguments: Mapping[str, Any] | None = None
+
+
+Prompter = Callable[[PermissionRequest], "Approval | Allow | Deny"]
 #: Decides whether a rule specifier covers a call; normally ``Tool.match_rule``.
 RuleMatcher = Callable[[str, Mapping[str, Any]], bool]
 
@@ -288,23 +328,53 @@ class PermissionManager:
         matcher: RuleMatcher | None = None,
         decision: Decision | None = None,
     ) -> bool:
-        """Return True if the call may proceed, prompting if the policy says ``ask``.
+        """Return True if the call may proceed, prompting if the policy says ``ask``."""
+        return self.decide(request, matcher=matcher, decision=decision).allowed
+
+    def decide(
+        self,
+        request: PermissionRequest,
+        *,
+        matcher: RuleMatcher | None = None,
+        decision: Decision | None = None,
+    ) -> PermissionOutcome:
+        """Resolve one call, prompting if the policy says ``ask``.
 
         A caller that already resolved the decision (the tool runner does, to
         decide whether to ask at all) passes it in so rules are matched once.
+        The prompter may answer with an :class:`Approval`, or with
+        :class:`Allow` / :class:`Deny` to add a reason or corrected arguments;
+        both reach the caller through :class:`PermissionOutcome`.
         """
         if decision is None:
             decision = self.decision_for(request.tool_name, request.kind, request.arguments, matcher)
         if decision is Decision.ALLOW:
-            return True
+            return PermissionOutcome(True)
         if decision is Decision.DENY:
-            return False
+            return PermissionOutcome(False)
         if self.has_session_grant(request.tool_name):
-            return True
+            return PermissionOutcome(True)
         if self._prompter is None:
-            return False  # non-interactive: ask => deny
-        approval = self._prompter(request)
-        if approval is Approval.SESSION:
-            self.grant_session(request.tool_name)
-            return True
-        return approval is Approval.ONCE
+            return PermissionOutcome(False)  # non-interactive: ask => deny
+        return self.resolve(request.tool_name, self._prompter(request))
+
+    def resolve(self, tool_name: str, answer: Approval | Allow | Deny | None) -> PermissionOutcome:
+        """Interpret one answer about ``tool_name``, wherever it came from.
+
+        Prompters and application hooks speak the same vocabulary, so what an
+        ``Allow`` or a ``Deny`` *means* — including remembering a grant for the
+        session — is decided here and nowhere else. ``None`` means "no opinion"
+        and leaves the call allowed to continue.
+        """
+        if isinstance(answer, Deny):
+            return PermissionOutcome(False, message=answer.message)
+        if isinstance(answer, Allow):
+            if answer.remember_session:
+                self.grant_session(tool_name)
+            return PermissionOutcome(True, updated_arguments=answer.updated_arguments)
+        if answer is Approval.SESSION:
+            self.grant_session(tool_name)
+            return PermissionOutcome(True)
+        if answer is None:
+            return PermissionOutcome(True)
+        return PermissionOutcome(answer is Approval.ONCE)
