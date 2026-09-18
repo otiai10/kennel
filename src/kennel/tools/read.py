@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from ..errors import ToolArgumentError, ToolExecutionError
 from ..permissions import PermissionKind
+from ..rules import match_path_argument
 from ._fs import is_probably_binary
 from .base import Tool, ToolContext, ToolParameter, ToolResult
 
@@ -28,6 +30,10 @@ class ReadTool(Tool):
         s, e = arguments.get("start_line"), arguments.get("end_line")
         rng = f" [{s or 1}-{e}]" if e else (f" [{s}-]" if s else "")
         return f"Read {arguments.get('path', '')}{rng}"
+
+    def match_rule(self, specifier: str, arguments: Mapping[str, Any]) -> bool:
+        """``read(**/.env)``: the specifier is a glob over the workspace-relative path."""
+        return match_path_argument(specifier, arguments)
 
     async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         ws = context.workspace

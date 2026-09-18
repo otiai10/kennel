@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from ..errors import ToolArgumentError
 from ..permissions import PermissionKind, PermissionManager
+from ..rules import match_arguments
 from ..workspace import Workspace
 
 ParamType = Literal["string", "integer", "number", "boolean"]
@@ -80,6 +81,19 @@ class Tool(ABC):
 
     def permission_warnings(self, arguments: dict[str, Any], context: ToolContext) -> tuple[str, ...]:
         return ()
+
+    # -- permission rules -----------------------------------------------------
+
+    def match_rule(self, specifier: str, arguments: Mapping[str, Any]) -> bool:
+        """Does the ``specifier`` of a rule ``name(specifier)`` cover this call?
+
+        The tool owns the meaning of its specifiers: ``shell`` matches the
+        command line, the file tools match the path. The default joins the
+        argument values and matches them as text, which is what a custom tool
+        gets for free. Called from the provider's tool thread, so it must not
+        touch mutable state.
+        """
+        return match_arguments(specifier, arguments)
 
     # -- validation -----------------------------------------------------------
 

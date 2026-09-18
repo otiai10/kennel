@@ -7,6 +7,7 @@ Run explicitly on an Apple Silicon Mac with Apple Intelligence enabled::
 They assert structure and tool traces, never exact model wording.
 """
 
+import json
 import os
 from pathlib import Path
 
@@ -54,6 +55,34 @@ async def test_structured_generation(provider):
     }
     out = await session.respond_structured("Meeting: we decided to ship on Friday and to adopt pytest.", schema)
     assert isinstance(out.get("decisions"), list) and len(out["decisions"]) >= 1
+
+
+async def test_structured_run_returns_a_dict(provider):
+    """`Agent.run(schema=)` on the real model: a schema-shaped dict, tools still usable.
+
+    Guided generation and tools coexist in one request (see spikes/06_structured_tools.py),
+    so the agent keeps its tools here.
+    """
+    from kennel import Agent
+
+    agent = Agent(FIXTURE, tools=["glob", "read"], provider=provider)
+    schema = {
+        "type": "object",
+        "properties": {
+            "decisions": {"type": "array", "items": {"type": "string"}, "description": "Decisions made"},
+            "title": {"type": "string", "description": "Meeting title or topic"},
+        },
+        "required": ["decisions", "title"],
+    }
+    result = await agent.run(
+        "Read transcripts/2026-09-16.txt and extract the meeting title and the decisions that were made.",
+        schema=schema,
+    )
+    assert isinstance(result.structured_output, dict)
+    assert set(schema["required"]) <= set(result.structured_output)
+    assert isinstance(result.structured_output["decisions"], list)
+    assert json.loads(result.text) == result.structured_output
+    assert result.to_dict()["structured_output"] == result.structured_output
 
 
 async def test_tool_calling_with_agent(provider):

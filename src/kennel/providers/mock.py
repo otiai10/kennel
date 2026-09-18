@@ -3,6 +3,9 @@
 A ``MockProvider`` is scripted per turn. Each turn is a plain string, a list of
 steps (:class:`ToolCall`, :class:`Text`, :class:`Raise`, :class:`Sleep`), or an
 async callable ``(prompt, invoke) -> str``.
+
+:meth:`MockProvider.from_json` reads the same script from JSON (``KENNEL_MOCK_SCRIPT``):
+``{"turns": [...], "structured": [...], "available": false}``.
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ from typing import Any
 
 from ..errors import ModelUnavailableError, ProviderError
 from ..tools.base import Tool
-from .base import ModelProvider, ProviderInfo, ProviderSession, ToolInvoker
+from .base import ModelProvider, ProviderInfo, ProviderSession, ToolInvoker, Usage
 
 
 @dataclass
@@ -80,18 +83,34 @@ class MockSession(ProviderSession):
             await asyncio.sleep(0)
 
     async def respond_structured(self, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+        """Return the next scripted value, running the next turn's tool steps first.
+
+        Apple's guided generation calls tools inside the same request, so a script
+        reproduces that by pairing a step list (its :class:`Text` step is ignored) with
+        a ``structured`` value. Scripts without turns behave as before.
+        """
         self.prompts.append(prompt)
+        turn = self.provider._next_turn()
+        if turn is not None and not isinstance(turn, str) and not callable(turn):
+            for step in turn:
+                if isinstance(step, ToolCall):
+                    self.tool_results.append(await self.invoke(step.name, dict(step.arguments)))
+                elif isinstance(step, Raise):
+                    raise step.error
+                elif isinstance(step, Sleep):
+                    await asyncio.sleep(step.seconds)
         if not self.provider._structured:
             raise ProviderError("MockProvider has no structured responses left")
         return self.provider._structured.pop(0)
+
+    def usage(self) -> Usage | None:
+        return self.provider.reported_usage
 
     async def close(self) -> None:
         self.closed = True
 
 
 class MockProvider(ModelProvider):
-    info = ProviderInfo(name="mock", model="MockModel", mode="local")
-
     def __init__(
         self,
         turns: Sequence[Turn] | None = None,
@@ -99,11 +118,19 @@ class MockProvider(ModelProvider):
         structured: Sequence[dict[str, Any]] | None = None,
         available: bool = True,
         chunk_size: int = 8,
+        context_window_tokens: int | None = 4096,
+        reported_usage: Usage | None = None,
     ) -> None:
+        """``context_window_tokens=None`` mimics a provider that declares no window;
+        ``reported_usage`` mimics one that counts tokens itself."""
         self._turns: list[Turn] = list(turns or [])
         self._structured: list[dict[str, Any]] = list(structured or [])
         self.available = available
         self.chunk_size = chunk_size
+        self.reported_usage = reported_usage
+        self.info = ProviderInfo(
+            name="mock", model="MockModel", mode="local", context_window_tokens=context_window_tokens
+        )
         self.sessions: list[MockSession] = []
 
     def _next_turn(self) -> Turn | None:
@@ -137,4 +164,4 @@ class MockProvider(ModelProvider):
                 elif "sleep" in step:
                     steps.append(Sleep(float(step["sleep"])))
             turns.append(steps)
-        return cls(turns, structured=obj.get("structured"))
+        return cls(turns, structured=obj.get("structured"), available=bool(obj.get("available", True)))

@@ -22,6 +22,7 @@ class EventType:
     SESSION_STARTED = "session.started"
     SESSION_COMPLETED = "session.completed"
     SESSION_FAILED = "session.failed"
+    SESSION_CANCELLED = "session.cancelled"
     MODEL_STARTED = "model.started"
     MODEL_DELTA = "model.delta"
     MODEL_COMPLETED = "model.completed"
@@ -32,6 +33,7 @@ class EventType:
     TOOL_STARTED = "tool.started"
     TOOL_COMPLETED = "tool.completed"
     TOOL_FAILED = "tool.failed"
+    TOOL_BLOCKED = "tool.blocked"
     CONTEXT_COMPACTED = "context.compacted"
 
 

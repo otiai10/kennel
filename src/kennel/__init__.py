@@ -14,15 +14,28 @@ from .errors import (
     ToolError,
     ToolExecutionError,
     ToolOutputLimitError,
+    TurnCancelledError,
     WorkspaceError,
     WorkspaceEscapeError,
 )
 from .events import Event, EventBus, EventType
-from .permissions import Approval, Decision, PermissionKind, PermissionManager, PermissionRequest
-from .providers.base import ModelProvider, ProviderInfo, ProviderSession
+from .hooks import HookContext, HookMatcher, Hooks, ToolCallRequest
+from .permissions import (
+    Allow,
+    Approval,
+    Decision,
+    Deny,
+    PermissionKind,
+    PermissionManager,
+    PermissionMode,
+    PermissionOutcome,
+    PermissionRequest,
+    PermissionRule,
+)
+from .providers.base import ModelProvider, ProviderInfo, ProviderSession, Usage
 from .providers.mock import MockProvider
 from .runner import ToolCallRecord
-from .session import AgentResult, Session, Usage
+from .session import AgentResult, ContextUsage, Session
 from .tools.base import Tool, ToolContext, ToolLimits, ToolParameter, ToolResult
 from .workspace import Workspace
 
@@ -31,14 +44,20 @@ __version__ = "0.0.3"
 __all__ = [
     "Agent",
     "AgentResult",
+    "Allow",
     "Approval",
     "ConfigurationError",
     "ContextLimitError",
+    "ContextUsage",
     "DEFAULT_INSTRUCTIONS",
     "Decision",
+    "Deny",
     "Event",
     "EventBus",
     "EventType",
+    "HookContext",
+    "HookMatcher",
+    "Hooks",
     "KennelConfig",
     "KennelError",
     "MockProvider",
@@ -47,7 +66,10 @@ __all__ = [
     "PermissionDeniedError",
     "PermissionKind",
     "PermissionManager",
+    "PermissionMode",
+    "PermissionOutcome",
     "PermissionRequest",
+    "PermissionRule",
     "ProviderError",
     "ProviderInfo",
     "ProviderSession",
@@ -56,6 +78,7 @@ __all__ = [
     "Tool",
     "ToolArgumentError",
     "ToolCallRecord",
+    "ToolCallRequest",
     "ToolContext",
     "ToolError",
     "ToolExecutionError",
@@ -63,6 +86,7 @@ __all__ = [
     "ToolOutputLimitError",
     "ToolParameter",
     "ToolResult",
+    "TurnCancelledError",
     "Usage",
     "Workspace",
     "WorkspaceError",

@@ -52,4 +52,6 @@ user-facing message. Long documents are handled by `kennel.context.chunk_text` a
 `EventBus` delivers `session.*`, `model.*`, `tool.*`, `permission.*` and
 `context.compacted` events synchronously to subscribers, possibly from a worker thread.
 Events carry summaries, sizes and timings, never file contents. The CLI renderer is one
-subscriber; `--trace` prints the raw events as JSON lines.
+subscriber; `--trace` prints the raw events as JSON lines to stderr, and
+`--output-format stream-json` prints them to stdout under a documented schema
+(`docs/output-format.md`).

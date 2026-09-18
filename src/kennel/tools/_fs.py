@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import difflib
 import os
-import re
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -92,54 +91,3 @@ def iter_files(workspace: Workspace, base: Path, *, include_hidden: bool = False
                 if not workspace.contains(real) or not real.is_file():
                     continue
             yield path
-
-
-def glob_to_regex(pattern: str) -> re.Pattern[str]:
-    """Translate a glob with ``**`` support into a regex over POSIX relative paths."""
-    i, n = 0, len(pattern)
-    out: list[str] = []
-    while i < n:
-        c = pattern[i]
-        if c == "*":
-            if pattern[i : i + 3] == "**/":
-                out.append("(?:.*/)?")
-                i += 3
-                continue
-            if pattern[i : i + 2] == "**":
-                out.append(".*")
-                i += 2
-                continue
-            out.append("[^/]*")
-        elif c == "?":
-            out.append("[^/]")
-        elif c == "[":
-            j = pattern.find("]", i + 1)
-            if j == -1:
-                out.append(re.escape(c))
-            else:
-                body = pattern[i + 1 : j]
-                if body.startswith("!"):
-                    body = "^" + body[1:]
-                out.append("[" + body.replace("\\", "\\\\") + "]")
-                i = j
-        else:
-            out.append(re.escape(c))
-        i += 1
-    return re.compile("^" + "".join(out) + "$")
-
-
-def matches_glob(pattern: str, relative_posix: str) -> bool:
-    """Match a workspace-relative POSIX path.
-
-    Patterns without ``/`` match the basename at any depth, or the whole path
-    with ``*`` allowed to cross directories (so ``*transcript*`` finds
-    ``transcripts/a.txt``).
-    """
-    if "/" not in pattern:
-        if glob_to_regex(pattern).match(relative_posix.rsplit("/", 1)[-1]):
-            return True
-        loose = re.compile("^" + glob_to_regex(pattern).pattern[1:-1].replace("[^/]*", ".*").replace("[^/]", ".") + "$")
-        return loose.match(relative_posix) is not None
-    if pattern.startswith("./"):
-        pattern = pattern[2:]
-    return glob_to_regex(pattern).match(relative_posix) is not None

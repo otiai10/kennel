@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from ..errors import ToolExecutionError
 from ..permissions import PermissionKind
-from ._fs import iter_files, matches_glob
+from ..rules import match_path_argument, matches_glob
+from ._fs import iter_files
 from .base import Tool, ToolContext, ToolParameter, ToolResult
 
 
@@ -28,6 +30,10 @@ class GlobTool(Tool):
         path = arguments.get("path")
         suffix = f" in {path}" if path and path not in (".", "./") else ""
         return f"Glob {arguments.get('pattern', '')}{suffix}"
+
+    def match_rule(self, specifier: str, arguments: Mapping[str, Any]) -> bool:
+        """``glob(src/**)``: the specifier is a glob over the search root (default ``.``)."""
+        return match_path_argument(specifier, arguments, default=".")
 
     async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         pattern = arguments["pattern"].strip()

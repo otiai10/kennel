@@ -73,12 +73,17 @@ kennel --help
 > shipped with Xcode 27, so with Xcode 26.x it fails to compile. The upper bound will be
 > lifted once a matching Xcode is common.
 
-Check that the model is usable:
+Check that Kennel can run here:
 
 ```bash
-fm available          # Apple's CLI: "System model available"
-kennel . -p "hello"   # exit code 3 with a clear message if the model is unavailable
+kennel doctor
 ```
+
+This checks the Python version, platform, `apple_fm_sdk` install and model availability,
+Xcode, user/project config files, the workspace, and prints the effective tools/permissions.
+Failing checks show `✗` with a reason and, where there is one, a fix; add `--json` for a
+machine-readable report (handy when filing a bug: paste the output of `kennel doctor --json`).
+Exit code is `0` when everything checks out, `1` otherwise.
 
 ## CLI
 
@@ -91,17 +96,78 @@ kennel -p "Read the README and explain this project"   # one-shot
 | Option | Effect |
 | --- | --- |
 | `-p, --prompt TEXT` | run one prompt, print the answer, exit |
-| `--read-only` | only `glob`, `grep`, `read` are available |
-| `--allow-write` | `write` and `edit` run without asking |
+| `--permission-mode MODE` | `read-only`, `default`, `accept-edits`, `dont-ask` or `bypass` |
+| `--read-only` | only `glob`, `grep`, `read` are available (= `--permission-mode read-only`) |
+| `--allow-write` | `write` and `edit` run without asking (= `--permission-mode accept-edits`) |
 | `--allow-shell` | `shell` runs without asking (see Security) |
 | `--allow-web` | enable the `web` tool (asks; needs a configured search provider) |
-| `--non-interactive` | never prompt; anything that would ask is denied |
+| `--non-interactive` | never prompt; anything that would ask is denied (= `--permission-mode dont-ask`) |
+| `--instructions TEXT\|@FILE` | append text (or a file's contents) to the default instructions |
+
+| `--system-prompt TEXT\|@FILE` | replace the default instructions entirely (or a file's contents) |
 | `--max-tool-calls N` | tool call budget per turn (default 32) |
+| `--output-format FORMAT` | with `-p`: `text` (default), `json`, `stream-json` |
+| `--json-schema TEXT\|@FILE` | with `-p`: answer under a JSON schema (guided generation) |
 | `--verbose` | show tool output sizes and timings |
 | `--trace` | write every agent event as JSON lines to stderr |
 
-Interactive commands: `/help`, `/status`, `/clear`, `/exit`. `Ctrl-C` cancels the current
-answer (twice at the prompt exits); `Ctrl-D` exits.
+Interactive commands: `/help`, `/status`, `/usage`, `/clear`, `/compact`, `/permissions [<tool>
+allow|ask|deny]`, `/exit`. `Ctrl-C` cancels the current answer via `Session.interrupt()` and
+returns to the prompt (twice at the prompt exits); `Ctrl-D` exits.
+
+The on-device model's context window is about 4k tokens, which is the tightest constraint in
+practice, so `/usage` shows how full it is. With `--verbose` the same line is printed after
+every answer:
+
+```text
+> /usage
+window: 4096 tokens
+used: 504 tokens (estimated)
+context: 12%
+turns: 1
+compactions: 0
+```
+
+For scripts and other processes, `-p` can print machine-readable JSON instead of the human
+rendering:
+
+```bash
+kennel . -p "summarize the README" --output-format json
+# {"type":"result","text":"...","stop_reason":"end_turn","is_error":false,"duration_ms":1234, ...}
+
+kennel . -p "summarize the README" --output-format stream-json
+# {"type":"session.started","session_id":"...","timestamp":...,"data":{...}}
+# {"type":"model.delta","session_id":"...","timestamp":...,"data":{"text":"..."}}
+# {"type":"result", ...}
+```
+
+In both formats stdout is JSON only; diagnostics stay on stderr. The keys, the event types
+and the versioning promise are documented in [docs/output-format.md](docs/output-format.md).
+
+`--json-schema` answers under a schema instead of in prose. Tools still work, so the model
+can look things up and then fill the schema in one request:
+
+```bash
+kennel ~/meetings -p "extract the decisions from the latest transcript" --json-schema @schema.json
+# {"title": "Release planning", "decisions": ["Ship v0.1 on Friday"]}
+```
+
+The three older flags are sugar for a mode, so `--permission-mode` cannot be combined with
+them. `bypass` allows everything including `shell` and prints a warning line in the header.
+
+| Mode | read tools | `write` / `edit` | `shell` | `web` | Tool set |
+| --- | --- | --- | --- | --- | --- |
+| `read-only` | allow | deny | deny | deny | `glob`, `grep`, `read` only |
+| `default` | allow | ask | ask | deny | all |
+| `accept-edits` | allow | allow | ask | ask | all |
+| `dont-ask` | allow | deny | deny | deny | all |
+| `bypass` | allow | allow | allow | allow | all |
+
+`/compact` summarizes the conversation so far and starts a fresh model session seeded with
+that summary (this happens automatically when a turn no longer fits the context window;
+`/compact` lets you do it on your own terms). `/permissions` alone prints the decision
+(`allow`/`ask`/`deny`) and session grant for every enabled tool; `/permissions shell allow`
+changes a tool's decision for the rest of the session (not written back to `kennel.json`).
 
 Every tool call is shown as one line (`● Read transcripts/2026-09-16.txt [1-50]`). Mutations
 ask first:
@@ -130,7 +196,12 @@ asyncio.run(main())
 ```
 
 `Agent.run()` returns an `AgentResult` (`text`, `stop_reason`, `tool_calls`, `usage`,
-`session_id`). Multi-turn conversations use a session:
+`session_id`, `duration_ms`, `is_error`, `structured_output`, `compactions`). `usage` is a
+`Usage` (`input_tokens`, `output_tokens`) and is only filled when the provider counts tokens
+itself; on Apple's on-device model it stays `None`, because the SDK exposes no token counter.
+Kennel does not guess it per turn — use `context_usage()` below for a picture of the window.
+`result.to_dict()` gives the same JSON object the CLI prints with `--output-format json`.
+Multi-turn conversations use a session:
 
 ```python
 session = agent.new_session()
@@ -138,19 +209,152 @@ await session.run("Summarize transcripts/2026-09-16.txt")
 await session.run("Now only the TODOs")
 ```
 
-Permissions are per tool (`allow`, `ask`, `deny`); `ask` needs a prompter, otherwise it
-means `deny`:
+To follow a turn as it happens, iterate it instead. `Session.stream()` yields the session's
+events on *your* event loop — including the ones a provider fires from a worker thread — so
+no queue plumbing or thread-safety work is needed on the application side. A session is also
+an async context manager, so `close()` runs on the way out:
+
+```python
+async with agent.new_session() as session:
+    async for event in session.stream("Summarize the latest transcript"):
+        if event.type == "model.delta":
+            print(event.data["text"], end="", flush=True)
+        elif event.type.startswith("tool."):
+            print(event.type, event.data.get("summary"))
+    print(session.last_result.stop_reason)      # the full AgentResult of the last turn
+```
+
+The iterator's last event is `session.completed`, whose `data` carries `text`, `stop_reason`,
+`tool_calls` and `turns`. A provider failure is raised out of the `async for` after the
+`session.failed` event has been delivered. `Agent.stream(prompt)` is the one-shot form: it
+runs a throwaway session and its final `session.completed` event carries the same `text` that
+`Agent.run()` would return. `run(on_delta=...)` still works and is unchanged.
+
+A running turn can be stopped from anywhere — another task, another thread, a GUI's stop
+button — with `Session.interrupt()`. The waiting `run()` emits `session.cancelled` and
+raises `TurnCancelledError`; the session stays usable for the next turn:
+
+```python
+from kennel import TurnCancelledError
+
+task = asyncio.create_task(session.run("Summarize every transcript"))
+session.interrupt()                    # safe from any thread or task; a no-op when idle
+try:
+    await task
+except TurnCancelledError:
+    print("stopped")
+await session.run("Just the latest one, then")   # the session is still good
+```
+
+A plain `task.cancel()` is left alone and still surfaces as `asyncio.CancelledError`, so
+cancellation coming from an outer scope keeps asyncio's meaning. The CLI's `Ctrl-C` goes
+through `interrupt()` too, so the terminal and an embedding application take the same path.
+
+Because the window is small, `Session.context_usage()` tells you how much of it is left
+before you decide how big the next chunk should be:
+
+```python
+u = session.context_usage()
+u.window_tokens     # 4096 on Apple's on-device model; None if the provider declares none
+u.used_tokens       # what the live provider session holds right now
+u.ratio             # 0.0-1.0 (0.0 when no window is declared)
+u.estimated         # True when Kennel estimated it from text rather than being told
+u.turns, u.compactions
+print(u.summary())  # "12% of 4096 tokens (504 tokens, estimated)"
+```
+
+`used_tokens` counts what is *in the live provider session*: the instructions plus the turns
+since it was opened. Compacting the conversation replaces that session with a summarized one,
+so the number drops — which is what makes it useful as a budget. A provider that counts tokens
+itself can implement `ProviderSession.usage()`; its figure is then used for both
+`context_usage()` (with `estimated` False) and `AgentResult.usage`.
+
+Permissions are rules mapped to `allow`, `ask` or `deny`; `ask` needs a prompter, otherwise
+it means `deny`. A rule is a tool name, or a tool name with a specifier the tool interprets —
+the command line for `shell`, the workspace-relative path for the file tools, and the joined
+argument values for a custom tool:
 
 ```python
 from kennel import Agent, Approval
 
-def prompter(request):            # request.summary, request.details (diff / command), request.warnings
-    return Approval.ONCE          # or Approval.SESSION / Approval.DENY
+def prompter(request):            # request.summary, request.details (diff / command),
+    return Approval.ONCE          # request.warnings, request.arguments
 
 agent = Agent(".", tools=["glob", "grep", "read", "write", "edit", "shell"],
-              permissions={"write": "ask", "edit": "ask", "shell": "deny"},
+              permission_mode="accept-edits",     # the defaults rules are layered on
+              permissions={"shell": "ask",
+                           "shell(git *)": "allow",
+                           "shell(git push*)": "deny",
+                           "write(docs/**)": "allow",
+                           "read(**/.env)": "deny"},
               prompter=prompter)
 ```
+
+`deny` always wins, whether it came from `shell` or from `shell(rm *)`. Otherwise a matching
+specifier rule beats the bare tool rule, and `ask` beats `allow` among equally specific
+matches. `permission_mode` is one of `read-only`, `default`, `accept-edits`, `dont-ask`,
+`bypass` (see the table above); `read-only` also restricts the tool set.
+
+### Hooks
+
+Events report what happened; hooks decide what happens. An application embedding Kennel can
+stop a tool call, correct its arguments, replace a result, or add context to a prompt —
+without subclassing anything. Callbacks may be sync or async:
+
+```python
+from kennel import Agent, Allow, Deny, HookMatcher, Hooks, ToolResult
+
+async def guard(call, ctx):                    # before_tool: runs before the permission check
+    if "curl" in call.arguments.get("command", ""):
+        return Deny("network access is not allowed in this workspace")
+    return None                                # None means "no opinion"
+
+def cap_reads(call, ctx):
+    return Allow(updated_arguments={**call.arguments, "end_line": 100})
+
+def redact(call, result, ctx):                 # after_tool: return a ToolResult to replace it
+    return ToolResult(result.content.replace(SECRET, "***"))
+
+def add_context(prompt, session):              # before_prompt: appended to what the model sees
+    return "Today is 2026-09-18."
+
+agent = Agent(".", hooks=Hooks(
+    before_tool=[guard, HookMatcher(tools=["read"], hooks=[cap_reads])],
+    after_tool=[redact],
+    before_prompt=[add_context],
+))
+agent.hooks.before_tool.append(another_guard)   # also fine after construction
+```
+
+- `before_tool(call, ctx)` runs after the arguments are validated and **before** the
+  permission check, so a policy can deny what the permission policy would have allowed.
+  `Deny` records the call as `blocked`, emits `tool.blocked` and returns the message to the
+  model; `Allow(updated_arguments=...)` re-validates and continues; `Allow(remember="session")`
+  grants the tool for the session.
+- `after_tool(call, result, ctx)` may return a `ToolResult` to replace the result. The
+  replacement is bounded by the same output limit.
+- `before_prompt(prompt, session)` returns text appended to the prompt sent to the model.
+  The conversation history keeps the user's own words, and Kennel's internal re-prompts
+  (the narration guard) are not passed through the hook.
+- `HookMatcher(tools=[...], hooks=[...])` restricts hooks to named tools.
+- A hook that raises fails the tool call (`status="error"`). A broken policy is an error,
+  not an absence of policy — unlike an event subscriber, whose exceptions are only logged.
+- `ctx` is a `HookContext` carrying the `session_id`, the `tool` and the same `ToolContext`
+  the tool will run with (`ctx.workspace`, `ctx.permissions`, `ctx.environment`). Hooks run
+  on the provider's tool thread, so they get plain data and thread-safe services only, and
+  they must not hold anything bound to another event loop.
+
+The prompter can answer with more than an `Approval` too:
+
+```python
+def prompter(request):
+    if request.tool_name == "shell":
+        return Deny(message="shell is disabled for this workspace; use the file tools")
+    return Allow(remember="session")           # or Approval.ONCE / SESSION / DENY
+```
+
+`Deny.message` is what the model is told, so make it actionable; `Allow(updated_arguments=)`
+corrects the call before it runs.
 
 Custom tools subclass `kennel.Tool` and are passed alongside built-in names:
 
@@ -169,13 +373,27 @@ class ListMeetings(Tool):
 agent = Agent(".", tools=["read", ListMeetings()])
 ```
 
-Events (`session.started`, `tool.started`, `tool.completed`, `permission.requested`,
-`model.delta`, ...) are available through `agent.events.subscribe(callback)`; the CLI
-renderer is just one subscriber. Events carry summaries and sizes, never file contents.
+Events (`session.started`, `session.completed`, `session.failed`, `session.cancelled`,
+`model.started`, `model.delta`, `model.completed`, `model.nudged`, `tool.requested`,
+`tool.started`, `tool.completed`, `tool.failed`, `tool.blocked`, `permission.requested`,
+`permission.denied`, `context.compacted`) are available through
+`agent.events.subscribe(callback)`; the CLI renderer is just one subscriber. Events carry
+summaries and sizes, never file contents. Subscribers only observe — to intervene, use
+hooks (above). `Session.stream()` is the async-iterator view of the same events, for
+consumers that would rather `async for` than register a callback.
 
 The default instructions tell the model to glob, then grep/read, then answer, and include a
 one-line overview of the workspace's top-level entries. On the on-device model this is what
-makes tool use reliable, especially for non-English prompts. `AppleProvider(deterministic=True)`
+makes tool use reliable, especially for non-English prompts.
+
+`Agent(instructions=...)` (or `--instructions` / `kennel.json`'s `agent.instructions`) appends
+to those default instructions and is the safe way to add a house rule ("Answer in Japanese").
+`Agent(system_prompt=...)` (or `--system-prompt` / `agent.system_prompt`) **replaces** the
+default instructions outright; the workspace overview is still appended unless
+`include_workspace_overview=False`. Replacing the default instructions removes the
+glob-then-read procedure that keeps the on-device model calling tools instead of guessing, so
+tool use can become unreliable — only do this if your own instructions cover that ground.
+`AppleProvider(deterministic=True)`
 switches to greedy sampling so a given prompt yields the same trace and answer every run,
 which is what you want for evaluations:
 
@@ -192,10 +410,20 @@ turn ends with no tool call and the answer looks like that, Kennel re-prompts on
 the same session to carry the steps out; the CLI shows `↻ carrying out the described
 steps`. Set `"nudge_narration": false` under `"agent"` in `kennel.json` to turn it off.
 
-Structured output for application use goes through `ProviderSession.respond_structured`
-(Apple guided generation). `examples/meeting_summary.py` shows the reference workflow:
-chunk a transcript, extract a `MeetingSummary` per chunk, reduce. Owners and due dates
-that are not in the transcript stay `None`.
+**Structured output.** Pass a JSON schema to get a value instead of prose (Apple guided
+generation). Tools keep working: the provider calls them inside the same request, so
+`tool_calls` is populated as usual.
+
+```python
+result = await agent.run("Extract the decisions from the latest transcript", schema=MEETING_SCHEMA)
+result.structured_output          # dict
+result.text                       # the same document as JSON
+```
+
+`examples/meeting_summary.py` shows the reference workflow: chunk a transcript, extract a
+`MeetingSummary` per chunk with `agent.run(schema=...)`, reduce. Owners and due dates that
+are not in the transcript stay `None`. `ProviderSession.respond_structured` remains the
+provider-level primitive underneath.
 
 ## Configuration
 
@@ -212,10 +440,13 @@ approved from the prompt, planned for a later version). All keys are optional.
     "nudge_narration": true,
     "instructions": "Answer in Japanese."
   },
+  "permission_mode": "default",
   "permissions": {
     "write": "ask",
-    "edit": "ask",
-    "shell": "deny"
+    "write(docs/**)": "allow",
+    "shell": "ask",
+    "shell(git *)": "allow",
+    "read(**/.env)": "deny"
   },
   "tools": {
     "read": { "max_lines": 400 },
@@ -260,12 +491,13 @@ Repository layout:
 
 ```text
 src/kennel/
-  agent.py session.py runner.py      Agent, Session, tool runner (guardrails, permissions, events)
-  workspace.py permissions.py         path resolver, permission manager
+  agent.py session.py runner.py      Agent, Session, tool runner (guardrails, hooks, permissions, events)
+  hooks.py                           before_tool / after_tool / before_prompt callbacks
+  workspace.py permissions.py rules.py  path resolver, permission manager, glob/rule syntax
   registry.py tools/                  tool interface and built-ins (glob grep read write edit shell web)
   providers/                          provider abstraction, AppleProvider, MockProvider
   context.py config.py events.py      chunking/compaction, JSON config, event bus
-  cli/                                argparse CLI and renderer
+  cli/                                argparse CLI, renderer, JSON output
 tests/{unit,providers,e2e,integration}
 examples/                             meeting_summary.py, repo_qa.py
 spikes/                               Phase 0 SDK experiments (not production code)

@@ -10,9 +10,11 @@ permission rules approved from the prompt) with the standard library alone::
         "turn_timeout_seconds": 300,
         "nudge_narration": true,
         "tools": ["glob", "grep", "read"],
-        "instructions": "Answer in Japanese."
+        "instructions": "Answer in Japanese.",
+        "system_prompt": "You are a release-notes assistant."
       },
-      "permissions": { "write": "ask", "shell": "deny" },
+      "permission_mode": "default",
+      "permissions": { "write": "ask", "shell": "ask", "shell(git *)": "allow" },
       "tools": {
         "max_output_bytes": 65536,
         "read": { "max_lines": 400, "max_file_bytes": 2000000 },
@@ -32,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigurationError
-from .permissions import parse_policy
+from .permissions import PermissionMode, parse_policy
 from .tools.base import ToolLimits
 
 USER_CONFIG_PATH = Path("~/.config/kennel/settings.json").expanduser()
@@ -50,9 +52,11 @@ class KennelConfig:
     grep_max_results: int = 100
     shell_timeout_seconds: int = 30
     nudge_narration: bool = True
+    permission_mode: str | None = None
     permissions: dict[str, str] = field(default_factory=dict)
     tools: list[str] | None = None
     instructions: str | None = None
+    system_prompt: str | None = None
     sources: list[str] = field(default_factory=list)
 
     def limits(self) -> ToolLimits:
@@ -124,6 +128,12 @@ def apply_config(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>"
         if not isinstance(agent["instructions"], str):
             raise ConfigurationError(f"{source}: agent.instructions must be a string")
         cfg.instructions = agent["instructions"]
+    if "permission_mode" in data:
+        cfg.permission_mode = PermissionMode.parse(data["permission_mode"]).value
+    if "system_prompt" in agent:
+        if not isinstance(agent["system_prompt"], str):
+            raise ConfigurationError(f"{source}: agent.system_prompt must be a string")
+        cfg.system_prompt = agent["system_prompt"]
     perms = data.get("permissions", {})
     if not isinstance(perms, dict):
         raise ConfigurationError(f"{source}: 'permissions' must be an object")

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from pathlib import Path
 
 from .config import KennelConfig, load_config
-from .events import EventBus
-from .permissions import Decision, PermissionManager, Prompter
+from .events import Event, EventBus
+from .hooks import Hooks
+from .permissions import DEFAULT_MODE, Decision, PermissionManager, PermissionMode, Prompter
 from .providers.base import ModelProvider
 from .registry import DEFAULT_TOOLS, ToolRegistry, builtin_registry
 from .session import AgentResult, Session
@@ -48,8 +49,12 @@ class Agent:
         *,
         tools: Iterable[str | Tool] | None = None,
         permissions: Mapping[str, Decision | str] | None = None,
+        permission_mode: PermissionMode | str | None = None,
+        hooks: Hooks | None = None,
         provider: ModelProvider | None = None,
         instructions: str | None = None,
+        system_prompt: str | None = None,
+        include_workspace_overview: bool = True,
         config: KennelConfig | None = None,
         prompter: Prompter | None = None,
         events: EventBus | None = None,
@@ -58,19 +63,31 @@ class Agent:
     ) -> None:
         self.workspace = Workspace(workspace)
         self.config = config if config is not None else load_config(self.workspace.root)
+        mode_spec = permission_mode if permission_mode is not None else self.config.permission_mode
+        self.permission_mode = PermissionMode.parse(mode_spec) if mode_spec is not None else DEFAULT_MODE
         reg = registry or builtin_registry()
-        resolved = reg.resolve(tools, self.config.tools or DEFAULT_TOOLS)
+        default_tools = self.config.tools or self.permission_mode.tools() or DEFAULT_TOOLS
+        resolved = reg.resolve(tools, default_tools)
         self.tools: dict[str, Tool] = {t.name: t for t in resolved}
         policy: dict[str, Decision | str] = dict(self.config.permissions)
         policy.update(permissions or {})
-        self.permissions = PermissionManager(policy, prompter=prompter)
+        self.permissions = PermissionManager(policy, prompter=prompter, mode=self.permission_mode)
+        self.hooks = hooks if hooks is not None else Hooks()
         self.provider: ModelProvider = provider if provider is not None else _default_provider()
         self.events = events if events is not None else EventBus()
         self.environment: dict[str, str] = dict(environment or {})
+        # Precedence for the replacing base (CLI > Agent() argument > project config > user config),
+        # matching config.py's documented precedence: config already reflects CLI/project/user layers,
+        # so it wins over the raw constructor argument only when explicitly set.
+        self.system_prompt: str | None = self.config.system_prompt if self.config.system_prompt is not None else system_prompt
+        self.include_workspace_overview = include_workspace_overview
         self.instructions = self._build_instructions(instructions)
 
     def _build_instructions(self, extra: str | None) -> str:
-        parts = [DEFAULT_INSTRUCTIONS, f"Workspace root: {self.workspace.root}\n{workspace_overview(self.workspace)}"]
+        base = self.system_prompt if self.system_prompt is not None else DEFAULT_INSTRUCTIONS
+        parts = [base]
+        if self.include_workspace_overview:
+            parts.append(f"Workspace root: {self.workspace.root}\n{workspace_overview(self.workspace)}")
         if self.config.instructions:
             parts.append(self.config.instructions.strip())
         if extra:
@@ -92,10 +109,28 @@ class Agent:
         return Session(self)
 
     async def run(self, prompt: str, **kwargs) -> AgentResult:
-        """Run ``prompt`` in a fresh session and return the result."""
+        """Run ``prompt`` in a fresh session and return the result.
+
+        Keyword arguments go to :meth:`Session.run` — ``on_delta`` to stream the answer,
+        ``schema`` for a JSON-schema-shaped :attr:`AgentResult.structured_output`.
+        """
         session = self.new_session()
         try:
             return await session.run(prompt, **kwargs)
+        finally:
+            await session.close()
+
+    async def stream(self, prompt: str) -> AsyncIterator[Event]:
+        """Run ``prompt`` in a fresh session and yield its events as they happen.
+
+        The last event is ``session.completed``; its ``data["text"]`` is the same
+        answer :meth:`run` returns. Use :meth:`new_session` when you need the
+        ``AgentResult`` itself or more than one turn.
+        """
+        session = self.new_session()
+        try:
+            async for event in session.stream(prompt):
+                yield event
         finally:
             await session.close()
 

@@ -17,6 +17,36 @@ if TYPE_CHECKING:
     from .providers.base import ProviderSession
 
 
+# Token estimation constants. The on-device model gives us no token counter, so
+# usage is estimated from text. Measured against Apple's tokenizer on English and
+# Japanese samples: latin script runs about four characters per token, CJK about
+# two. Tool output is only kept as a UTF-8 byte count, so it is divided by four.
+CHARS_PER_TOKEN = 4.0
+CJK_CHARS_PER_TOKEN = 2.0
+BYTES_PER_TOKEN = 4.0
+
+_CJK = re.compile(
+    r"[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]"
+)
+
+
+def estimate_tokens(text: str) -> float:
+    """Estimate how many tokens ``text`` costs, counting CJK characters as denser.
+
+    Deliberately cheap and approximate: it exists so a 4k window can be shown as
+    a percentage, not to predict the tokenizer exactly.
+    """
+    if not text:
+        return 0.0
+    cjk = len(_CJK.findall(text))
+    return cjk / CJK_CHARS_PER_TOKEN + (len(text) - cjk) / CHARS_PER_TOKEN
+
+
+def estimate_tokens_from_bytes(size: int) -> float:
+    """Estimate tokens for text we only kept the UTF-8 byte length of."""
+    return max(0, size) / BYTES_PER_TOKEN
+
+
 _NARRATION_PHRASES = re.compile(
     # announcing steps instead of taking them
     r"(実行します|検索します|探します|読み込みます|確認します|行います|させてください|してみます|しましょう|以下のコマンド|次のコマンド|"
