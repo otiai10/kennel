@@ -50,6 +50,7 @@ Step 4 is the only place the permission precedence lives (`src/kennel/permission
 - The SDK invokes `Tool.call()` on a worker thread with its own event loop. `ToolRunner`, hooks and the permission manager are therefore thread-safe and never await objects bound to the caller's loop.
 - `stream_response()` blocks the loop it runs on between snapshots. `AppleProvider` runs every request on a dedicated model thread and forwards results (or snapshots) back to the caller's loop.
 - Bridged SDK tool objects must stay referenced for the session lifetime; `AppleSession` holds them.
+- `LanguageModelSession.respond()` returns a `str` without a schema and, with one, a content object whose `.value()` holds the structured result; `AppleSession` branches on that and callers must not assume one type.
 - `Session.stream()` relays bus events onto the consumer's loop through an `asyncio.Queue`, so an application never sees a worker thread. `Session.interrupt()` posts the cancellation to the loop that started the turn and is safe from any thread; the CLI's Ctrl-C uses the same call.
 
 ## Context
