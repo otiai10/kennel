@@ -58,3 +58,10 @@ class WorkspaceEscapeError(WorkspaceError):
 
 class SessionError(KennelError):
     """The agent session could not continue."""
+
+
+class TurnCancelledError(SessionError):
+    """The running turn was interrupted through :meth:`kennel.Session.interrupt`.
+
+    The session itself stays usable: the next ``run()`` starts a fresh turn.
+    """

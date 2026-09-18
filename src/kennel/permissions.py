@@ -97,6 +97,16 @@ class PermissionManager:
     def interactive(self) -> bool:
         return self._prompter is not None
 
+    def cancel_prompt(self) -> None:
+        """Release a prompter that is waiting for input, if it supports being cancelled.
+
+        Called when a turn is interrupted: a prompter blocked on stdin would
+        otherwise keep the turn alive until the user answers it.
+        """
+        cancel = getattr(self._prompter, "cancel", None)
+        if callable(cancel):
+            cancel()
+
     def policy(self) -> dict[str, Decision]:
         return dict(self._policy)
 

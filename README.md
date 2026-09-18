@@ -101,7 +101,8 @@ kennel -p "Read the README and explain this project"   # one-shot
 | `--trace` | write every agent event as JSON lines to stderr |
 
 Interactive commands: `/help`, `/status`, `/clear`, `/exit`. `Ctrl-C` cancels the current
-answer (twice at the prompt exits); `Ctrl-D` exits.
+answer via `Session.interrupt()` and returns to the prompt (twice at the prompt exits);
+`Ctrl-D` exits.
 
 Every tool call is shown as one line (`● Read transcripts/2026-09-16.txt [1-50]`). Mutations
 ask first:
@@ -159,6 +160,26 @@ The iterator's last event is `session.completed`, whose `data` carries `text`, `
 runs a throwaway session and its final `session.completed` event carries the same `text` that
 `Agent.run()` would return. `run(on_delta=...)` still works and is unchanged.
 
+A running turn can be stopped from anywhere — another task, another thread, a GUI's stop
+button — with `Session.interrupt()`. The waiting `run()` emits `session.cancelled` and
+raises `TurnCancelledError`; the session stays usable for the next turn:
+
+```python
+from kennel import TurnCancelledError
+
+task = asyncio.create_task(session.run("Summarize every transcript"))
+session.interrupt()                    # safe from any thread or task; a no-op when idle
+try:
+    await task
+except TurnCancelledError:
+    print("stopped")
+await session.run("Just the latest one, then")   # the session is still good
+```
+
+A plain `task.cancel()` is left alone and still surfaces as `asyncio.CancelledError`, so
+cancellation coming from an outer scope keeps asyncio's meaning. The CLI's `Ctrl-C` goes
+through `interrupt()` too, so the terminal and an embedding application take the same path.
+
 Permissions are per tool (`allow`, `ask`, `deny`); `ask` needs a prompter, otherwise it
 means `deny`:
 
@@ -195,6 +216,13 @@ Events (`session.started`, `tool.started`, `tool.completed`, `permission.request
 renderer is just one subscriber. Events carry summaries and sizes, never file contents.
 `Session.stream()` is the async-iterator view of the same events, for consumers that would
 rather `async for` than register a callback.
+
+Events (`session.started`, `session.completed`, `session.failed`, `session.cancelled`,
+`model.started`, `model.delta`, `model.completed`, `model.nudged`, `tool.requested`,
+`tool.started`, `tool.completed`, `tool.failed`, `permission.requested`,
+`permission.denied`, `context.compacted`) are available through
+`agent.events.subscribe(callback)`; the CLI renderer is just one subscriber. Events carry
+summaries and sizes, never file contents.
 
 The default instructions tell the model to glob, then grep/read, then answer, and include a
 one-line overview of the workspace's top-level entries. On the on-device model this is what
