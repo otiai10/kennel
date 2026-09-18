@@ -15,6 +15,8 @@ permission rules approved from the prompt) with the standard library alone::
       },
       "permission_mode": "default",
       "permissions": { "write": "ask", "shell": "ask", "shell(git *)": "allow" },
+      "provider": "apple",
+      "providers": { "apple": { "deterministic": false } },
       "tools": {
         "max_output_bytes": 65536,
         "read": { "max_lines": 400, "max_file_bytes": 2000000 },
@@ -35,6 +37,7 @@ from typing import Any
 
 from .errors import ConfigurationError
 from .permissions import PermissionMode, parse_policy
+from .providers.registry import DEFAULT_PROVIDER
 from .tools.base import ToolLimits
 
 USER_CONFIG_PATH = Path("~/.config/kennel/settings.json").expanduser()
@@ -54,6 +57,8 @@ class KennelConfig:
     nudge_narration: bool = True
     permission_mode: str | None = None
     permissions: dict[str, str] = field(default_factory=dict)
+    provider: str = DEFAULT_PROVIDER
+    providers: dict[str, dict[str, Any]] = field(default_factory=dict)
     tools: list[str] | None = None
     instructions: str | None = None
     system_prompt: str | None = None
@@ -77,7 +82,9 @@ class KennelConfig:
                 continue
             if not hasattr(cfg, key):
                 raise ConfigurationError(f"Unknown config key: {key}")
-            if key == "permissions":
+            if key == "providers":
+                cfg.providers = _merge_providers(cfg.providers, value)
+            elif key == "permissions":
                 cfg.permissions = {**cfg.permissions, **{k: str(v.value if hasattr(v, "value") else v) for k, v in value.items()}}
             else:
                 setattr(cfg, key, value)
@@ -95,8 +102,23 @@ _INT_KEYS = {
 }
 
 
+def _merge_providers(
+    base: dict[str, dict[str, Any]], overrides: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Merge provider options per name, with ``overrides`` winning key by key."""
+    merged = {name: dict(options) for name, options in base.items()}
+    for name, options in overrides.items():
+        merged[name] = {**merged.get(name, {}), **options}
+    return merged
+
+
 def apply_config(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>") -> KennelConfig:
-    cfg = dataclasses.replace(cfg, permissions=dict(cfg.permissions), sources=list(cfg.sources))
+    cfg = dataclasses.replace(
+        cfg,
+        permissions=dict(cfg.permissions),
+        providers={name: dict(options) for name, options in cfg.providers.items()},
+        sources=list(cfg.sources),
+    )
     agent = data.get("agent", {})
     tools = data.get("tools", {})
     if not isinstance(agent, dict) or not isinstance(tools, dict):
@@ -134,6 +156,18 @@ def apply_config(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>"
         if not isinstance(agent["system_prompt"], str):
             raise ConfigurationError(f"{source}: agent.system_prompt must be a string")
         cfg.system_prompt = agent["system_prompt"]
+    if "provider" in data:
+        if not isinstance(data["provider"], str):
+            raise ConfigurationError(f"{source}: 'provider' must be a provider name (a string)")
+        cfg.provider = data["provider"]
+    if "providers" in data:
+        providers = data["providers"]
+        if not isinstance(providers, dict):
+            raise ConfigurationError(f"{source}: 'providers' must be an object keyed by provider name")
+        for name, options in providers.items():
+            if not isinstance(options, dict):
+                raise ConfigurationError(f"{source}: providers.{name} must be an object")
+        cfg.providers = _merge_providers(cfg.providers, providers)
     perms = data.get("permissions", {})
     if not isinstance(perms, dict):
         raise ConfigurationError(f"{source}: 'permissions' must be an object")

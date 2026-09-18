@@ -34,6 +34,10 @@ permissions, bounded tool output, context handling, tracing, and a small CLI.
 - Xcode 26+ installed, with the license agreed (the SDK builds a Swift bridge on install)
 - Python 3.10+
 
+The first three are what the default `apple` provider needs. Kennel itself installs on other
+platforms too (`apple-fm-sdk` carries a `sys_platform == "darwin"` marker), where you pick
+another provider with `--provider` or the `provider` config key.
+
 ## Install
 
 Kennel is not on PyPI yet (the name is pending a [PEP 541 request](https://github.com/pypi/support/issues/12302)).
@@ -71,7 +75,9 @@ kennel --help
 > **About the `apple-fm-sdk<0.2.1` pin.** The SDK has no wheels; installing it builds a Swift
 > bridge with your Xcode. Version 0.2.1 references APIs that only exist in the macOS 27 SDK
 > shipped with Xcode 27, so with Xcode 26.x it fails to compile. The upper bound will be
-> lifted once a matching Xcode is common.
+> lifted once a matching Xcode is common. The dependency is marked
+> `; sys_platform == "darwin"`: on a Mac `uv tool install` still brings the SDK along, and on
+> Linux the `kennel` command installs without any Swift build.
 
 Check that Kennel can run here:
 
@@ -79,8 +85,9 @@ Check that Kennel can run here:
 kennel doctor
 ```
 
-This checks the Python version, platform, `apple_fm_sdk` install and model availability,
-Xcode, user/project config files, the workspace, and prints the effective tools/permissions.
+This checks the Python version, platform, the selected provider (for `apple`: the `apple_fm_sdk`
+install and model availability), Xcode, user/project config files, the workspace, and prints the
+effective tools/permissions.
 Failing checks show `✗` with a reason and, where there is one, a fix; add `--json` for a
 machine-readable report (handy when filing a bug: paste the output of `kennel doctor --json`).
 Exit code is `0` when everything checks out, `1` otherwise.
@@ -105,6 +112,7 @@ kennel -p "Read the README and explain this project"   # one-shot
 | `--instructions TEXT\|@FILE` | append text (or a file's contents) to the default instructions |
 | `--system-prompt TEXT\|@FILE` | replace the default instructions entirely (or a file's contents) |
 | `--max-tool-calls N` | tool call budget per turn (default 32) |
+| `--provider NAME` | model provider to use (default: the `provider` config key, otherwise `apple`) |
 | `--output-format FORMAT` | with `-p`: `text` (default), `json`, `stream-json` |
 | `--json-schema TEXT\|@FILE` | with `-p`: answer under a JSON schema (guided generation) |
 | `--verbose` | show tool output sizes and timings |
@@ -396,6 +404,18 @@ from kennel.providers.apple import AppleProvider
 agent = Agent(".", provider=AppleProvider(deterministic=True))
 ```
 
+`provider=` also takes a registered provider's name (`Agent(".", provider="mock")`), the same
+names `--provider` offers; leaving it out uses the `provider` config key, defaulting to `apple`.
+A name is built with the options under `providers.<name>` in the config. Register your own with
+`ProviderSpec`, and `Agent`, the CLI and `kennel doctor` can all use it:
+
+```python
+from kennel import ProviderSpec, register_provider
+
+register_provider(ProviderSpec("echo", lambda **options: EchoProvider(**options)))
+agent = Agent(".", provider="echo")
+```
+
 **Narration guard.** Small models sometimes describe the tool steps they would take
 ("I'll run grep for that", "which file should I check?") instead of taking them. When a
 turn ends with no tool call and the answer looks like that, Kennel re-prompts once inside
@@ -431,6 +451,10 @@ approved from the prompt, planned for a later version). All keys are optional.
     "turn_timeout_seconds": 300,
     "nudge_narration": true,
     "instructions": "Answer in Japanese."
+  },
+  "provider": "apple",
+  "providers": {
+    "apple": { "deterministic": false }
   },
   "permission_mode": "default",
   "permissions": {
@@ -487,7 +511,7 @@ src/kennel/
   hooks.py                           before_tool / after_tool / before_prompt callbacks
   workspace.py permissions.py rules.py  path resolver, permission manager, glob/rule syntax
   registry.py tools/                  tool interface and built-ins (glob grep read write edit shell web)
-  providers/                          provider abstraction, AppleProvider, MockProvider
+  providers/                          provider abstraction, registry (name -> provider), AppleProvider, MockProvider
   context.py config.py events.py      chunking/compaction, JSON config, event bus
   cli/                                argparse CLI, renderer, JSON output
 tests/{unit,providers,e2e,integration}

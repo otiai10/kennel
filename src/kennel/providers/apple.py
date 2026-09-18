@@ -19,6 +19,7 @@ import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any, Optional, TypeVar
 
+from ..diagnostics import Check
 from ..errors import ContextLimitError, ModelUnavailableError, ProviderError
 from ..tools.base import Tool, ToolParameter
 from .base import ModelProvider, ProviderInfo, ProviderSession, ToolInvoker
@@ -27,7 +28,9 @@ T = TypeVar("T")
 
 INSTALL_HINT = (
     "apple_fm_sdk is not installed. Install it with: pip install 'apple-fm-sdk==0.2.0' "
-    "(requires macOS 26+, Apple Silicon, Xcode and Apple Intelligence enabled)."
+    "(requires macOS 26+, Apple Silicon, Xcode and Apple Intelligence enabled). "
+    "On another platform, choose a different provider with --provider "
+    "(or the \"provider\" key in kennel.json)."
 )
 
 
@@ -276,3 +279,49 @@ class AppleProvider(ModelProvider):
         except Exception as exc:  # noqa: BLE001
             raise _map_error(fm, exc) from exc
         return AppleSession(fm, session, bridged, options)
+
+
+# -- registry hooks (see kennel.providers.registry) --------------------------
+
+
+def apple_provider(**options: Any) -> AppleProvider:
+    """Build an :class:`AppleProvider`, failing right away when the SDK is missing.
+
+    Choosing a provider you cannot run should say so at selection time, not at the
+    first prompt, so this imports ``apple_fm_sdk`` eagerly; the provider itself keeps
+    loading the model lazily.
+    """
+    _import_sdk()
+    return AppleProvider(**options)
+
+
+def apple_doctor_checks(**_options: Any) -> list[Check]:
+    """The ``kennel doctor`` checks that only make sense for Apple Foundation Models."""
+    try:
+        import apple_fm_sdk as fm
+    except ImportError as exc:
+        return [
+            Check(
+                "apple_fm_sdk",
+                False,
+                f"apple_fm_sdk is not installed ({exc})",
+                hint="pip install 'apple-fm-sdk==0.2.0' (requires macOS 26+, Apple Silicon, Xcode)",
+            ),
+            Check("model availability", False, "skipped: apple_fm_sdk is not importable"),
+        ]
+    sdk = Check("apple_fm_sdk", True, f"apple_fm_sdk {getattr(fm, '__version__', 'unknown')} importable")
+    try:
+        AppleProvider().check_availability()
+    except ModelUnavailableError as exc:
+        return [
+            sdk,
+            Check(
+                "model availability",
+                False,
+                str(exc),
+                hint="see the detail above for what to change in System Settings",
+            ),
+        ]
+    except Exception as exc:  # noqa: BLE001 - a broken SDK must not stop the other checks
+        return [sdk, Check("model availability", False, f"could not check availability: {exc}")]
+    return [sdk, Check("model availability", True, "Apple Foundation Models available (SystemLanguageModel)")]

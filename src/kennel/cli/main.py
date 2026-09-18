@@ -18,6 +18,7 @@ from .. import __version__
 from ..agent import Agent
 from ..errors import ConfigurationError, KennelError, ModelUnavailableError, TurnCancelledError
 from ..permissions import Decision, PermissionMode
+from ..providers.registry import names as provider_names
 from ..registry import DEFAULT_TOOLS
 from ..session import AgentResult, Session
 from .output import FORMATS, DocumentOutput, JsonOutput, MachineOutput
@@ -60,7 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
         "the model may become less reliable at using tools without them",
     )
     p.add_argument("--max-tool-calls", type=int, default=None, metavar="N", help="tool call limit per turn (default: 32)")
-    p.add_argument("--provider", choices=("apple", "mock"), default="apple", help=argparse.SUPPRESS)
+    p.add_argument(
+        "--provider",
+        choices=provider_names(),
+        default=None,
+        help="model provider to use (default: the 'provider' config key, otherwise apple)",
+    )
     p.add_argument(
         "--output-format",
         choices=FORMATS,
@@ -79,21 +85,22 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _make_provider(name: str):
-    if name == "mock":
-        from ..providers.mock import MockProvider
+def _provider_options_from_env() -> dict[str, dict[str, object]] | None:
+    """Provider options the environment supplies, in the shape of the ``providers`` config key.
 
-        script = os.environ.get("KENNEL_MOCK_SCRIPT", "")
-        looks_like_path = script and not script.lstrip().startswith("{") and len(script) < 1024
-        if looks_like_path:
-            try:
-                script = Path(script).read_text(encoding="utf-8")
-            except OSError as exc:
-                raise ConfigurationError(f"KENNEL_MOCK_SCRIPT: cannot read {script!r}: {exc}") from exc
-        return MockProvider.from_json(script or "{}")
-    from ..providers.apple import AppleProvider
-
-    return AppleProvider()
+    Only ``KENNEL_MOCK_SCRIPT`` (inline JSON or a path to it) exists today; it becomes the
+    ``mock`` provider's ``script`` option, so the registry stays the only place that builds
+    providers.
+    """
+    script = os.environ.get("KENNEL_MOCK_SCRIPT", "")
+    if not script:
+        return None
+    if not script.lstrip().startswith("{") and len(script) < 1024:
+        try:
+            script = Path(script).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ConfigurationError(f"KENNEL_MOCK_SCRIPT: cannot read {script!r}: {exc}") from exc
+    return {"mock": {"script": script}}
 
 
 def _resolve_text_or_file(value: str | None, workspace: str, flag: str) -> str | None:
@@ -171,14 +178,16 @@ def build_agent(args: argparse.Namespace, prompter: ConsolePrompter | None) -> A
     config = load_config(Path(args.workspace).expanduser()).merged(
         max_tool_calls=args.max_tool_calls,
         instructions=instructions,
+        provider=args.provider,
+        providers=_provider_options_from_env(),
     )
+    # The provider is left to Agent, which resolves config.provider through the registry.
     return Agent(
         args.workspace,
         tools=tools,
         permissions=permissions,
         permission_mode=mode,
         system_prompt=system_prompt,
-        provider=_make_provider(args.provider),
         config=config,
         prompter=prompter,
     )
@@ -191,7 +200,12 @@ def build_doctor_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("workspace", nargs="?", default=".", help="workspace directory to check (default: current directory)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
-    p.add_argument("--provider", choices=("apple", "mock"), default="apple", help=argparse.SUPPRESS)
+    p.add_argument(
+        "--provider",
+        choices=provider_names(),
+        default=None,
+        help="provider to check (default: the 'provider' config key, otherwise apple)",
+    )
     return p
 
 

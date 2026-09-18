@@ -84,7 +84,7 @@ name = "kennel"
 version = "0.0.3"
 source = { editable = "." }
 dependencies = [
-    { name = "apple-fm-sdk" },
+    { name = "apple-fm-sdk", marker = "sys_platform == 'darwin'" },
 ]
 
 [package.optional-dependencies]
@@ -96,7 +96,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "apple-fm-sdk", specifier = ">=0.2.0,<0.2.1" },
+    { name = "apple-fm-sdk", marker = "sys_platform == 'darwin'", specifier = ">=0.2.0,<0.2.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
