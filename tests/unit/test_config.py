@@ -42,6 +42,20 @@ def test_system_prompt_precedence(tmp_path: Path):
     assert merged.system_prompt == "cli prompt" and cfg.system_prompt == "project prompt"  # original untouched
 
 
+def test_provider_precedence_and_option_merge(tmp_path: Path):
+    user = tmp_path / "settings.json"
+    user.write_text(json.dumps({"provider": "mock", "providers": {"mock": {"script": "{}", "keep": 1}}}))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "kennel.json").write_text(json.dumps({"providers": {"mock": {"script": "project"}}}))
+    cfg = load_config(ws, user_config=user)
+    assert cfg.provider == "mock"  # user value kept: the project file only set options
+    assert cfg.providers == {"mock": {"script": "project", "keep": 1}}  # merged per name
+    merged = cfg.merged(provider="apple", providers={"mock": {"script": "cli"}})
+    assert merged.provider == "apple" and merged.providers["mock"] == {"script": "cli", "keep": 1}
+    assert cfg.provider == "mock" and cfg.providers["mock"]["script"] == "project"  # original untouched
+
+
 def test_missing_files_are_fine(tmp_path: Path):
     cfg = load_config(tmp_path, user_config=tmp_path / "nope.json")
     assert cfg == KennelConfig()
@@ -59,6 +73,9 @@ def test_missing_files_are_fine(tmp_path: Path):
         {"agent": {"nudge_narration": "yes"}},
         {"agent": {"system_prompt": 123}},
         {"agent": []},
+        {"provider": 1},
+        {"providers": []},
+        {"providers": {"mock": "script"}},
     ],
 )
 def test_invalid_values(data):

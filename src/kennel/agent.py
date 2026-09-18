@@ -11,6 +11,7 @@ from .events import Event, EventBus
 from .hooks import Hooks
 from .permissions import DEFAULT_MODE, Decision, PermissionManager, PermissionMode, Prompter
 from .providers.base import ModelProvider
+from .providers.registry import create as create_provider
 from .registry import DEFAULT_TOOLS, ToolRegistry, builtin_registry
 from .session import AgentResult, Session
 from .tools.base import Tool, ToolContext
@@ -27,12 +28,6 @@ Answer concisely, grounded in the tool results, in the language of the user's re
 End with one short sentence proposing the next step you can take with your tools (for example drafting a reply, saving a summary to a file, or checking another file), when there is one."""
 
 
-def _default_provider() -> ModelProvider:
-    from .providers.apple import AppleProvider
-
-    return AppleProvider()
-
-
 class Agent:
     """Configure once, then :meth:`run` prompts or open :meth:`new_session` for multi-turn use.
 
@@ -41,6 +36,10 @@ class Agent:
         agent = Agent(workspace="~/meetings", tools=["glob", "grep", "read"])
         result = await agent.run("Find the latest transcript and summarize it")
         print(result.text)
+
+    ``provider`` takes a :class:`~kennel.ModelProvider` or a registered provider name
+    (``Agent(provider="mock")``); ``None`` uses the ``provider`` config key, defaulting to
+    ``apple``. A name is built with the options under ``providers.<name>`` in the config.
     """
 
     def __init__(
@@ -51,7 +50,7 @@ class Agent:
         permissions: Mapping[str, Decision | str] | None = None,
         permission_mode: PermissionMode | str | None = None,
         hooks: Hooks | None = None,
-        provider: ModelProvider | None = None,
+        provider: ModelProvider | str | None = None,
         instructions: str | None = None,
         system_prompt: str | None = None,
         include_workspace_overview: bool = True,
@@ -73,7 +72,7 @@ class Agent:
         policy.update(permissions or {})
         self.permissions = PermissionManager(policy, prompter=prompter, mode=self.permission_mode)
         self.hooks = hooks if hooks is not None else Hooks()
-        self.provider: ModelProvider = provider if provider is not None else _default_provider()
+        self.provider: ModelProvider = self._resolve_provider(provider)
         self.events = events if events is not None else EventBus()
         self.environment: dict[str, str] = dict(environment or {})
         # Precedence: Agent() argument > project config > user config. The CLI passes its
@@ -81,6 +80,13 @@ class Agent:
         self.system_prompt: str | None = system_prompt if system_prompt is not None else self.config.system_prompt
         self.include_workspace_overview = include_workspace_overview
         self.instructions = self._build_instructions(instructions)
+
+    def _resolve_provider(self, provider: ModelProvider | str | None) -> ModelProvider:
+        """An instance wins over any configuration; a name is resolved by the registry."""
+        if isinstance(provider, ModelProvider):
+            return provider
+        name = provider if provider is not None else self.config.provider
+        return create_provider(name, **self.config.providers.get(name, {}))
 
     def _build_instructions(self, extra: str | None) -> str:
         base = self.system_prompt if self.system_prompt is not None else DEFAULT_INSTRUCTIONS
