@@ -1,4 +1,4 @@
-# Machine-readable output (`--output-format`)
+# Machine-readable output (`--output-format`, `--json-schema`)
 
 Schema version: **1**. This document is the contract for anything that parses Kennel's
 stdout. Adding a key is not a breaking change; removing or retyping one is, and bumps the
@@ -13,17 +13,38 @@ kennel . -p "summarize the README" --output-format stream-json
 
 | Value | stdout |
 | --- | --- |
-| `text` (default) | human output: one line per tool call, then the streamed answer |
+| `text` (default) | human output: one line per tool call, then the streamed answer — unless `--json-schema` is given, in which case stdout is the structured JSON document alone |
 | `json` | exactly one line: the [result object](#result-object) |
 | `stream-json` | one JSON object per line ([events](#event-objects)), the result object last |
 
-`--output-format json|stream-json` without `-p` exits **2** with a message on stderr; that
-error is plain text, because the output contract is only established once the flag is valid.
+`--output-format json|stream-json` (and `--json-schema`) without `-p` exits **2** with a
+message on stderr; that error is plain text, because the output contract is only established
+once the flags are valid.
 
 In `json` and `stream-json` mode **stdout carries nothing but JSON**: tool lines, the
 streamed answer and notes are suppressed. Everything human moves to stderr — `error: ...`
 messages, `--verbose` logging, the interactive permission prompt, and `--trace` (which keeps
 writing its own event lines to stderr and can be combined with either format).
+
+## `--json-schema`
+
+`--json-schema TEXT|@FILE` answers under guided generation instead of prose. The value is a
+JSON schema, either inline or read from a file named after a leading `@`; anything that is
+not a JSON **object** is rejected with exit **2**. Tools still work — the provider calls them
+inside the same request — so `tool_calls` is populated as usual.
+
+```bash
+kennel . -p "extract the decisions" --json-schema @schema.json
+# { "title": "Release planning", "decisions": ["Ship v0.1 on Friday"] }
+
+kennel . -p "extract the decisions" --json-schema @schema.json --output-format json
+# {"type":"result","text":"{\n  \"title\": ...}","structured_output":{"title":"Release planning", ...}, ...}
+```
+
+With the default `text` format, stdout is the document alone (tool lines are suppressed, the
+same rule as the machine formats). With `json` / `stream-json` the document goes into
+`structured_output` and its text into `text`; the two always agree, so
+`json.loads(result["text"]) == result["structured_output"]`.
 
 ## Result object
 
@@ -41,7 +62,7 @@ object.
 | `session_id` | string | the session this turn ran in (empty when it failed before the session started) |
 | `tool_calls` | array of [tool call](#tool-call-object) | every tool call of this turn, in order |
 | `usage` | object \| null | `{"input_tokens", "output_tokens"}`; `null` while the on-device provider reports no token counts |
-| `structured_output` | object \| null | guided-generation result; `null` unless a schema was requested |
+| `structured_output` | object \| null | the guided-generation value when `--json-schema` (SDK: `run(schema=)`) was used, else `null`. When set, `text` is the same document as JSON |
 | `compactions` | integer | how often the conversation was compacted to fit the context window |
 
 The exit code is unchanged by the output format: `0` ok, `1` runtime error or turn timeout,
@@ -85,8 +106,9 @@ Event types: `session.started`, `session.completed`, `session.failed`, `model.st
 `permission.requested`, `permission.denied`, `tool.started`, `tool.completed`,
 `tool.failed`, `context.compacted`.
 
-`model.delta` carries `{"text": "..."}` — the generated fragment. Every other event carries
-summaries, sizes and durations only, never file contents or generated text: that invariant
+`model.delta` carries `{"text": "..."}` — the generated fragment. Guided generation arrives
+whole, so a `--json-schema` turn emits exactly one `model.delta` holding the document. Every
+other event carries summaries, sizes and durations only, never file contents or generated text: that invariant
 belongs to the event bus (`kennel.events`) and `--trace` relies on it too. Concatenating the
 `model.delta` texts reproduces `result.text`.
 

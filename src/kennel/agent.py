@@ -92,7 +92,11 @@ class Agent:
         return Session(self)
 
     async def run(self, prompt: str, **kwargs) -> AgentResult:
-        """Run ``prompt`` in a fresh session and return the result."""
+        """Run ``prompt`` in a fresh session and return the result.
+
+        Keyword arguments go to :meth:`Session.run` — ``on_delta`` to stream the answer,
+        ``schema`` for a JSON-schema-shaped :attr:`AgentResult.structured_output`.
+        """
         session = self.new_session()
         try:
             return await session.run(prompt, **kwargs)
