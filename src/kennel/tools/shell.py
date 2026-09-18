@@ -13,10 +13,12 @@ import os
 import re
 import signal
 import subprocess
+from collections.abc import Mapping
 from typing import Any
 
 from ..errors import ToolArgumentError
 from ..permissions import PermissionKind
+from ..rules import matches_text
 from .base import Tool, ToolContext, ToolParameter, ToolResult
 
 ENV_ALLOWLIST = ("PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TZ")
@@ -53,6 +55,10 @@ class ShellTool(Tool):
 
     def permission_warnings(self, arguments: dict[str, Any], context: ToolContext) -> tuple[str, ...]:
         return tuple(reason for pattern, reason in DANGEROUS_PATTERNS if re.search(pattern, arguments["command"]))
+
+    def match_rule(self, specifier: str, arguments: Mapping[str, Any]) -> bool:
+        """``shell(git *)``: the specifier is a glob over the whole command line."""
+        return matches_text(specifier, str(arguments.get("command", "")))
 
     async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         command = arguments["command"]

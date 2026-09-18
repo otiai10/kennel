@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .config import KennelConfig, load_config
 from .events import Event, EventBus
-from .permissions import Decision, PermissionManager, Prompter
+from .permissions import DEFAULT_MODE, Decision, PermissionManager, PermissionMode, Prompter
 from .providers.base import ModelProvider
 from .registry import DEFAULT_TOOLS, ToolRegistry, builtin_registry
 from .session import AgentResult, Session
@@ -48,6 +48,7 @@ class Agent:
         *,
         tools: Iterable[str | Tool] | None = None,
         permissions: Mapping[str, Decision | str] | None = None,
+        permission_mode: PermissionMode | str | None = None,
         provider: ModelProvider | None = None,
         instructions: str | None = None,
         config: KennelConfig | None = None,
@@ -58,12 +59,15 @@ class Agent:
     ) -> None:
         self.workspace = Workspace(workspace)
         self.config = config if config is not None else load_config(self.workspace.root)
+        mode_spec = permission_mode if permission_mode is not None else self.config.permission_mode
+        self.permission_mode = PermissionMode.parse(mode_spec) if mode_spec is not None else DEFAULT_MODE
         reg = registry or builtin_registry()
-        resolved = reg.resolve(tools, self.config.tools or DEFAULT_TOOLS)
+        default_tools = self.config.tools or self.permission_mode.tools() or DEFAULT_TOOLS
+        resolved = reg.resolve(tools, default_tools)
         self.tools: dict[str, Tool] = {t.name: t for t in resolved}
         policy: dict[str, Decision | str] = dict(self.config.permissions)
         policy.update(permissions or {})
-        self.permissions = PermissionManager(policy, prompter=prompter)
+        self.permissions = PermissionManager(policy, prompter=prompter, mode=self.permission_mode)
         self.provider: ModelProvider = provider if provider is not None else _default_provider()
         self.events = events if events is not None else EventBus()
         self.environment: dict[str, str] = dict(environment or {})
