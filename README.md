@@ -143,9 +143,10 @@ asyncio.run(main())
 ```
 
 `Agent.run()` returns an `AgentResult` (`text`, `stop_reason`, `tool_calls`, `usage`,
-`session_id`). `usage` is a `Usage` (`input_tokens`, `output_tokens`, `estimated`); on the
-on-device model it is estimated, because the SDK exposes no token counter. Multi-turn
-conversations use a session:
+`session_id`). `usage` is a `Usage` (`input_tokens`, `output_tokens`) and is only filled when
+the provider counts tokens itself; on Apple's on-device model it stays `None`, because the SDK
+exposes no token counter. Kennel does not guess it per turn — use `context_usage()` below for a
+picture of the window. Multi-turn conversations use a session:
 
 ```python
 session = agent.new_session()
@@ -169,8 +170,8 @@ print(u.summary())  # "12% of 4096 tokens (504 tokens, estimated)"
 `used_tokens` counts what is *in the live provider session*: the instructions plus the turns
 since it was opened. Compacting the conversation replaces that session with a summarized one,
 so the number drops — which is what makes it useful as a budget. A provider that counts tokens
-itself can implement `ProviderSession.usage()` and the reported figure is used instead, with
-`estimated` False.
+itself can implement `ProviderSession.usage()`; its figure is then used for both
+`context_usage()` (with `estimated` False) and `AgentResult.usage`.
 
 Permissions are per tool (`allow`, `ask`, `deny`); `ask` needs a prompter, otherwise it
 means `deny`:

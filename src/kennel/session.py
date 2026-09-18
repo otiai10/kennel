@@ -159,8 +159,7 @@ class Session:
         window = self.agent.provider.info.context_window_tokens
         measured = self._reported_usage()
         if measured is not None:
-            used = (measured.input_tokens or 0) + (measured.output_tokens or 0)
-            estimated = measured.estimated
+            used, estimated = (measured.input_tokens or 0) + (measured.output_tokens or 0), False
         else:
             used, estimated = math.ceil(self._estimate_window_tokens()), True
         ratio = min(1.0, used / window) if window else 0.0
@@ -249,17 +248,14 @@ class Session:
         records = self.runner.turn_records()
         self.history.append(Turn(prompt, text, stop_reason, records))
         self._emit(EventType.MODEL_COMPLETED, stop_reason=stop_reason, chars=len(text), tool_calls=len(records))
-        usage = self._turn_usage(prompt, text, records)
-        return AgentResult(text=text, stop_reason=stop_reason, tool_calls=records, usage=usage, session_id=self.id)
-
-    def _turn_usage(self, prompt: str, text: str, records: list[ToolCallRecord]) -> Usage:
-        """The provider's count for this turn, or an estimate marked as such."""
-        measured = self._reported_usage()
-        if measured is not None:
-            return measured
-        sent = estimate_tokens(prompt) + sum(estimate_tokens_from_bytes(c.output_bytes) for c in records)
-        return Usage(
-            input_tokens=math.ceil(sent), output_tokens=math.ceil(estimate_tokens(text)), estimated=True
+        # usage stays None unless the provider counts tokens: an estimate per turn would
+        # duplicate context_usage() without anything to calibrate it against.
+        return AgentResult(
+            text=text,
+            stop_reason=stop_reason,
+            tool_calls=records,
+            usage=self._reported_usage(),
+            session_id=self.id,
         )
 
     def _should_nudge(self, text: str) -> bool:
