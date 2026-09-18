@@ -416,6 +416,50 @@ register_provider(ProviderSpec("echo", lambda **options: EchoProvider(**options)
 agent = Agent(".", provider="echo")
 ```
 
+### llama-server (a bigger context window, no Apple Intelligence needed)
+
+The on-device model's window is 4096 tokens, which a 20KB file does not fit. The
+`llama-server` provider talks to a [llama.cpp](https://github.com/ggml-org/llama.cpp) server
+you run yourself, so the window is whatever you started it with. **Kennel never downloads a
+model and never starts the server** — that stays your decision:
+
+```bash
+brew install llama.cpp
+llama-server -hf Qwen/Qwen3-4B-GGUF:Q4_K_M --jinja -c 32768 --port 8080 --host 127.0.0.1
+# a thinking model: add --reasoning off, or the model thinks before every tool call
+kennel ~/meetings --provider llama-server
+```
+
+```json
+{
+  "provider": "llama-server",
+  "providers": {
+    "llama-server": {
+      "base_url": "http://127.0.0.1:8080",
+      "model": null,
+      "timeout": 300,
+      "extra_body": { "chat_template_kwargs": { "enable_thinking": false } }
+    }
+  }
+}
+```
+
+- `base_url` defaults to `http://127.0.0.1:8080`. A **loopback** host reports `mode: local`;
+  any other host reports `mode: remote` in the CLI header, because inference then leaves this
+  machine (see [Local-first contract](#local-first-contract)).
+- `model` overrides the name `/v1/models` reports; `timeout` bounds each socket operation;
+  `extra_body` is merged into every request body for model-specific knobs. Kennel adds none
+  of its own.
+- The context window comes from the server's `/props`, and the token counts come from the
+  server itself — so with this provider `AgentResult.usage` is filled and `/usage` says
+  *reported by the provider* instead of *estimated*.
+- Any OpenAI-compatible server (Ollama, LM Studio, mlx-lm) speaks the same protocol, but
+  llama-server is the one Kennel is tested against.
+
+Ctrl-C (`Session.interrupt()`), `Session.stream()`, `run(schema=)` and `compact()` all work
+the same as on Apple; the tool-calling loop for chat-completions providers is
+`kennel/providers/chatloop.py`, shared rather than written per provider.
+
 **Narration guard.** Small models sometimes describe the tool steps they would take
 ("I'll run grep for that", "which file should I check?") instead of taking them. When a
 turn ends with no tool call and the answer looks like that, Kennel re-prompts once inside
@@ -454,7 +498,8 @@ approved from the prompt, planned for a later version). All keys are optional.
   },
   "provider": "apple",
   "providers": {
-    "apple": { "deterministic": false }
+    "apple": { "deterministic": false },
+    "llama-server": { "base_url": "http://127.0.0.1:8080" }
   },
   "permission_mode": "default",
   "permissions": {
@@ -477,6 +522,8 @@ approved from the prompt, planned for a later version). All keys are optional.
 In the default configuration:
 
 - inference uses the Apple on-device model only;
+- a `llama-server` on a loopback address is equally local; pointing `base_url` at another
+  host is not, and says so with `mode: remote`;
 - local file contents are never sent over the network;
 - the `web` tool is disabled;
 - no telemetry is collected and no Kennel backend is involved.
@@ -501,6 +548,7 @@ pip install -e ".[dev]"
 ruff check src tests examples
 pytest                                   # unit, provider (MockProvider) and CLI tests; no model needed
 KENNEL_APPLE_TESTS=1 pytest -m apple     # Apple integration tests, on a capable Mac only
+KENNEL_LLAMA_SERVER=http://127.0.0.1:8080 pytest -m llama   # against a llama-server you started
 ```
 
 Repository layout:
@@ -511,7 +559,8 @@ src/kennel/
   hooks.py                           before_tool / after_tool / before_prompt callbacks
   workspace.py permissions.py rules.py  path resolver, permission manager, glob/rule syntax
   registry.py tools/                  tool interface and built-ins (glob grep read write edit shell web)
-  providers/                          provider abstraction, registry (name -> provider), AppleProvider, MockProvider
+  providers/                          provider abstraction, registry (name -> provider), AppleProvider,
+                                      LlamaServerProvider, the shared chat loop, MockProvider
   context.py config.py events.py      chunking/compaction, JSON config, event bus
   cli/                                argparse CLI, renderer, JSON output
 tests/{unit,providers,e2e,integration}
@@ -524,7 +573,8 @@ spikes/                               Phase 0 SDK experiments (not production co
 v0.0.3 plus the unreleased main branch: interactive and one-shot CLI with `kennel doctor`,
 machine-readable output (`--output-format`, `--json-schema`), permission modes and rule
 syntax, hooks, `Session.stream()` / `interrupt()` / `context_usage()`, MockProvider-based test
-suite, structured meeting summary example. Not yet: web search provider, persistent sessions,
-alternative models, MCP, subagents, sandboxed shell. Design principles live in
+suite, structured meeting summary example, and a `llama-server` provider for a larger context
+window. Not yet: web search provider, persistent sessions, in-process llama.cpp, MCP,
+subagents, sandboxed shell. Design principles live in
 [docs/constitution.md](docs/constitution.md); the comparison with Claude Code that drove the
 current roadmap is in `docs/history/`.

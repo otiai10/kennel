@@ -19,15 +19,31 @@ Application (CLI / custom Python app)
                       v                     v
                ModelProvider           Tools (glob grep read
                AppleProvider            write edit shell web)
+               LlamaServerProvider
                MockProvider
                       |
-                      v
-          apple_fm_sdk -> Foundation Models
+              +-------+--------+
+              v                v
+       apple_fm_sdk       ChatLoopSession -> ChatTransport
+              |                                  |
+              v                                  v
+     Foundation Models                 llama-server (HTTP)
 ```
 
 ## Who drives the loop
 
-Apple's SDK runs the tool-calling loop natively: `LanguageModelSession.respond()` invokes registered tools until the model produces a final answer. Kennel does not reimplement that protocol. Every Kennel tool is bridged into an `apple_fm_sdk.Tool` whose `call()` forwards to `ToolRunner.invoke(name, arguments)`, and the runner is the single place where validation, guardrails (per-turn budget, repeated identical calls), hooks, permission checks, execution, output bounding and events happen (`src/kennel/runner.py`).
+There are two families of provider, and the difference is who runs the tool-calling loop.
+
+**Native loop.** Apple's SDK runs it: `LanguageModelSession.respond()` invokes registered tools until the model produces a final answer, and Kennel does not reimplement that protocol. Every Kennel tool is bridged into an `apple_fm_sdk.Tool` whose `call()` forwards to `ToolRunner.invoke(name, arguments)`.
+
+**Shared loop.** A chat-completions model does not run any loop, so Kennel runs one — once, in `ChatLoopSession` (`src/kennel/providers/chatloop.py`). A provider in this family implements only a `ChatTransport` (messages in, `ChatChunk`s out) and gets the loop, the message bookkeeping and the termination rules from there; `LlamaServerProvider` is the first, and an in-process `llama-cpp` is meant to be the second. Its rules:
+
+- every request is streamed (`stream: true`), so `respond()`, `stream()` and `respond_structured()` are three wrappers around one loop and cannot disagree about the text;
+- streamed tool-call fragments are merged by their `index`; a thinking model's `reasoning_content` is dropped by the transport and never reaches the answer;
+- a tool call whose arguments are not a JSON object is answered with an error message rather than forwarded with a guessed `{}` — nothing reaches a tool except through `invoke`;
+- the per-turn tool budget is *not* duplicated here. The loop reads `ToolRunner.limit_hit` through the invoker it was handed (`_limit_reached`, which looks at the bound method's `__self__`, because `create_session` passes a bare callable); once the budget is spent one further request is allowed, and a further tool request ends the turn with the text so far. `Session.run` then reports `stop_reason` `tool_limit` as usual. `tool_choice: "none"` is deliberately not used to force an end: llama.cpp then leaks raw `<tool_call>` text into the answer.
+
+Either way `ToolRunner` is the single place where validation, guardrails (per-turn budget, repeated identical calls), hooks, permission checks, execution, output bounding and events happen (`src/kennel/runner.py`).
 
 Guided generation goes through the same loop: `Session.run(schema=)` calls `ProviderSession.respond_structured()`, and the provider still invokes tools inside that one request (verified on device, `tests/integration/test_apple.py`).
 
@@ -45,19 +61,20 @@ For every tool call `ToolRunner.invoke` does, in this order:
 
 Step 4 is the only place the permission precedence lives (`src/kennel/permissions.py`, `decision_for`): `deny` always wins, then a matching specifier rule beats the bare tool rule, then `ask` beats `allow`. A permission mode supplies the defaults the rules layer on; what a specifier means is decided by the tool (`Tool.match_rule`, glob syntax in `src/kennel/rules.py`). Pinned by `tests/unit/test_permission_rules.py` and `tests/unit/test_hooks.py`.
 
-## Threading (verified against apple_fm_sdk 0.2.0)
+## Threading (Apple verified against apple_fm_sdk 0.2.0, llama-server against 0.4.1)
 
 - The SDK invokes `Tool.call()` on a worker thread with its own event loop. `ToolRunner`, hooks and the permission manager are therefore thread-safe and never await objects bound to the caller's loop.
 - `stream_response()` blocks the loop it runs on between snapshots. `AppleProvider` runs every request on a dedicated model thread and forwards results (or snapshots) back to the caller's loop.
 - Bridged SDK tool objects must stay referenced for the session lifetime; `AppleSession` holds them.
 - `LanguageModelSession.respond()` returns a `str` without a schema and, with one, a content object whose `.value()` holds the structured result; `AppleSession` branches on that and callers must not assume one type.
 - `Session.stream()` relays bus events onto the consumer's loop through an `asyncio.Queue`, so an application never sees a worker thread. `Session.interrupt()` posts the cancellation to the loop that started the turn and is safe from any thread; the CLI's Ctrl-C uses the same call.
+- `LlamaServerProvider` has the same shape for a different reason: `http.client` is blocking, so each request reads the stream on a worker thread and hands parsed events to the caller's loop through a queue. Cancelling the turn *shuts the socket down* rather than closing the response — the reading thread holds the buffered reader's lock, so closing it from the event loop would block the loop for as long as the request would have taken. Each request owns its connection, so an aborted one is never reused.
 
 ## Context
 
 The provider maps the SDK's context-window error to `ContextLimitError`. `Session.run` never retries the same request blindly: it compacts the conversation into a short summary, opens a fresh provider session seeded with it, retries once, and otherwise fails with a user-facing message. `Session.compact()` exposes the same step on demand.
 
-`Session.context_usage()` reports how full the window is. `ProviderInfo.context_window_tokens` declares the window (4096 on the on-device model); `ProviderSession.usage()` may report a real count, otherwise Kennel estimates from the text in the live provider session and says so with `ContextUsage.estimated`. `AgentResult.usage` is filled only from a real count, never from the estimate. Long documents are handled by `kennel.context.chunk_text` and `map_reduce` (see `examples/meeting_summary.py`).
+`Session.context_usage()` reports how full the window is. `ProviderInfo.context_window_tokens` declares the window (4096 on the on-device model; whatever `/props` reports for a llama-server); `ProviderSession.usage()` may report a real count, otherwise Kennel estimates from the text in the live provider session and says so with `ContextUsage.estimated`. `AgentResult.usage` is filled only from a real count, never from the estimate. llama-server is the first provider that really counts: its `stream_options.include_usage` chunk is what `usage()` returns, so `estimated` is False there and stays True on Apple. Long documents are handled by `kennel.context.chunk_text` and `map_reduce` (see `examples/meeting_summary.py`).
 
 ## Events and hooks
 
@@ -68,6 +85,8 @@ Hooks (`src/kennel/hooks.py`) are the opposite kind of callback: they decide. `b
 ## Providers
 
 `ModelProvider.create_session()` returns a `ProviderSession` with `respond`, `stream`, optional `respond_structured` and `usage`, and `close`. `ProviderInfo` declares `name`, `model`, `mode` (`local` means inference and data stay on this machine; anything else must say so) and `context_window_tokens`. `MockProvider` scripts turns, tool calls, structured values and reported usage for the test suite (`tests/providers/`).
+
+`mode` is not a setting: `LlamaServerProvider` derives it from its `base_url`, and only a loopback host (`127.0.0.0/8`, `::1`, `localhost`) may call itself `local`. It is decided without any I/O, at construction, so a remote endpoint shows up in the CLI header before the first request. The provider talks to a server the user started: Kennel neither downloads a model nor launches a process, and adds nothing to a request body unless `extra_body` says so. `check_availability()` is where `/props` (`n_ctx`) and `/v1/models` (the model name) are read, and it runs once on the first `create_session()` if the caller never asked, so `info` is honest for an SDK consumer too.
 
 Providers are chosen by name, and `kennel.providers.registry` is the only place that maps a
 name to an implementation: a static dict of `ProviderSpec(name, factory, doctor_checks)` plus

@@ -46,6 +46,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
   "apple: requires Apple Foundation Models on this Mac (set KENNEL_APPLE_TESTS=1 to run)",
+  "llama: requires a running llama-server (set KENNEL_LLAMA_SERVER=<base_url> to run)",
 ]
 
 [tool.ruff]
