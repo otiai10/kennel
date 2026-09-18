@@ -21,12 +21,14 @@ from kennel import (
     ToolParameter,
     ToolResult,
     TurnCancelledError,
+    Usage,
 )
 from kennel.providers.mock import Raise, Sleep, Text, ToolCall
 
 
 def make_agent(meeting_ws: Path, turns, **kw) -> tuple[Agent, MockProvider, list]:
-    provider = MockProvider(turns, structured=kw.pop("structured", None))
+    provider_kw = {k: kw.pop(k) for k in ("structured", "reported_usage", "context_window_tokens") if k in kw}
+    provider = MockProvider(turns, **provider_kw)
     events = []
     agent = Agent(meeting_ws, provider=provider, **kw)
     agent.events.subscribe(lambda e: events.append(e))
@@ -37,7 +39,8 @@ async def test_final_response_only(meeting_ws):
     agent, provider, events = make_agent(meeting_ws, ["Just an answer."])
     result = await agent.run("hi")
     assert result.text == "Just an answer." and result.stop_reason == "end_turn"
-    assert result.tool_calls == [] and result.usage is None and len(result.session_id) == 12
+    assert result.tool_calls == [] and len(result.session_id) == 12
+    assert result.usage == Usage(input_tokens=1, output_tokens=4, estimated=True)  # "hi" / 15 chars
     types = [e.type for e in events]
     assert types == [EventType.SESSION_STARTED, EventType.MODEL_STARTED, EventType.MODEL_COMPLETED, EventType.SESSION_COMPLETED]
     assert events[0].data["tools"] == ["edit", "glob", "grep", "read", "shell", "write"]
@@ -511,4 +514,86 @@ async def test_interrupt_is_a_noop_when_no_turn_runs_and_plain_cancel_is_unchang
     assert EventType.SESSION_CANCELLED not in [e.type for e in events]
     session.interrupt()  # the turn is already over
     assert (await session.run("again")).text == "after cancel"
+
+# -- context usage ------------------------------------------------------------
+
+
+async def test_context_usage_is_estimated_after_two_turns(meeting_ws):
+    agent, _, _ = make_agent(meeting_ws, ["one", "two"])
+    session = agent.new_session()
+    empty = session.context_usage()
+    assert empty.window_tokens == 4096 and empty.turns == 0 and empty.used_tokens > 0  # instructions
+    await session.run("q1")
+    await session.run("q2")
+    usage = session.context_usage()
+    assert usage.window_tokens == 4096 and usage.used_tokens > empty.used_tokens
+    assert 0.0 <= usage.ratio <= 1.0 and usage.estimated is True
+    assert usage.turns == 2 and usage.compactions == 0
+    assert usage.summary().startswith(f"{usage.ratio:.0%} of 4096 tokens")
+    assert session.status()["context"] == usage.summary()
+    await session.close()
+
+
+async def test_compaction_lowers_context_usage(meeting_ws):
+    long_answer, short_answer = "A" * 6000, "C" * 40
+    turns = [long_answer, long_answer, [Raise(ContextLimitError("too big"))], short_answer]
+    agent, provider, _ = make_agent(meeting_ws, turns)
+    session = agent.new_session()
+    await session.run("q1 " + "x" * 2000)
+    await session.run("q2 " + "y" * 2000)
+    before = session.context_usage()
+    assert before.compactions == 0 and before.ratio == 1.0  # the window is full
+    result = await session.run("q3")
+    assert result.text == short_answer and len(provider.sessions) == 2
+    after = session.context_usage()
+    assert after.compactions == 1 and after.used_tokens < before.used_tokens
+    assert after.turns == 3 and after.ratio < before.ratio
+    await session.close()
+
+
+async def test_clear_resets_context_usage(meeting_ws):
+    agent, _, _ = make_agent(meeting_ws, ["one" * 2000, "two"])
+    session = agent.new_session()
+    await session.run("q1")
+    used = session.context_usage().used_tokens
+    await session.clear()
+    assert session.context_usage().used_tokens < used
+    assert session.context_usage().turns == 0
+    await session.close()
+
+
+async def test_apple_provider_declares_the_on_device_window():
+    from kennel.providers.apple import AppleProvider
+
+    assert AppleProvider().info.context_window_tokens == 4096  # no SDK import needed
+
+
+async def test_agent_result_usage_is_filled(meeting_ws):
+    agent, _, _ = make_agent(meeting_ws, [[ToolCall("glob", {"pattern": "**/*.txt"}), Text("答えは以下の通りです")]])
+    result = await agent.run("最新の議事録を要約して")
+    assert result.usage is not None and result.usage.estimated is True
+    assert result.usage.input_tokens > 0  # prompt plus the tool output bytes
+    assert result.usage.output_tokens > 0
+
+
+async def test_reported_usage_wins_over_the_estimate(meeting_ws):
+    reported = Usage(input_tokens=1200, output_tokens=300)
+    agent, _, _ = make_agent(meeting_ws, ["done"], reported_usage=reported)
+    session = agent.new_session()
+    result = await session.run("q1")
+    assert result.usage == reported and result.usage.estimated is False
+    usage = session.context_usage()
+    assert usage.used_tokens == 1500 and usage.estimated is False
+    assert usage.ratio == pytest.approx(1500 / 4096)
+    await session.close()
+
+
+async def test_provider_without_a_declared_window(meeting_ws):
+    agent, _, _ = make_agent(meeting_ws, ["done"], context_window_tokens=None)
+    session = agent.new_session()
+    await session.run("q1")
+    usage = session.context_usage()
+    assert usage.window_tokens is None and usage.ratio == 0.0  # no division by zero
+    assert usage.used_tokens > 0 and usage.estimated is True
+    assert usage.summary().endswith("window unknown")
     await session.close()

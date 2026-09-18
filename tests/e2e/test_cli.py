@@ -49,7 +49,8 @@ def test_one_shot_transcript_flow(meeting_ws):
     assert "● Read transcripts/2026-09-16.txt [1-12]" in out
     assert "✗ Path escapes the workspace" in out
     assert "⊘ denied: Write minutes/2026-09-16.md" in out  # stdin is not a tty: ask => deny
-    assert out.rstrip().endswith("Unresolved: release notes owner.")
+    assert "Unresolved: release notes owner." in out
+    assert out.rstrip().splitlines()[-1].startswith("(context: ")  # --verbose reports window usage
     assert not (meeting_ws / "minutes").exists()
     assert "↳" in out  # verbose sizes
 
@@ -219,3 +220,21 @@ def test_interactive_ctrl_c_cancels_the_turn(meeting_ws):
     assert "(cancelled)" in text, text
     assert "after cancel" in text, text  # the session is still usable after the interrupt
     assert "Traceback" not in text and "never" not in text
+
+def test_usage_command_reports_the_context_window(meeting_ws):
+    script = {"turns": [[{"tool": "read", "arguments": {"path": "transcripts/2026-09-16.txt"}}, {"text": "summarized"}]]}
+    stdin = "/usage\nsummarize it\n/usage\n/status\n/exit\n"
+    p = run_cli([], meeting_ws, script=script, stdin=stdin)
+    assert p.returncode == 0, p.stderr
+    out = p.stdout
+    assert "/usage    show how full the model's context window is" not in out  # /help was not asked for
+    blocks = out.split("window: ")
+    assert len(blocks) == 3, out  # one per /usage
+    for block in blocks[1:]:
+        assert block.startswith("4096 tokens\nused: ")
+        assert "(estimated)\ncontext: " in block
+    before = int(blocks[1].split("used: ")[1].split(" tokens")[0])
+    after = int(blocks[2].split("used: ")[1].split(" tokens")[0])
+    assert after > before  # the turn and its tool output now sit in the window
+    assert "turns: 0\ncompactions: 0" in blocks[1] and "turns: 1\ncompactions: 0" in blocks[2]
+    assert "context: " in out.split("session_id: ")[-1]  # /status carries a context line

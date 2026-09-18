@@ -20,11 +20,21 @@ from ..tools.base import Tool
 ToolInvoker = Callable[[str, dict[str, Any]], Awaitable[str]]
 
 
+@dataclass
+class Usage:
+    """Tokens a request consumed. ``estimated`` marks a Kennel-side approximation."""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    estimated: bool = False
+
+
 @dataclass(frozen=True)
 class ProviderInfo:
     name: str
     model: str
     mode: str = "local"  # "local": inference and data stay on this machine
+    context_window_tokens: int | None = None  # None: the provider does not declare one
 
 
 class ProviderSession(ABC):
@@ -41,6 +51,14 @@ class ProviderSession(ABC):
     async def respond_structured(self, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
         """Guided generation against a JSON schema. Optional."""
         raise ProviderError("This provider does not support structured generation")
+
+    def usage(self) -> Usage | None:
+        """Tokens this conversation has consumed so far, if the provider counts them.
+
+        Optional: ``None`` means Kennel has to estimate. Synchronous because a
+        provider that tracks this has the number already.
+        """
+        return None
 
     async def close(self) -> None:
         return None

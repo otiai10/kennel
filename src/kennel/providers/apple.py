@@ -237,7 +237,12 @@ class AppleSession(ProviderSession):
 
 
 class AppleProvider(ModelProvider):
-    info = ProviderInfo(name="apple", model="Apple SystemLanguageModel", mode="local")
+    # apple_fm_sdk 0.2.0 exposes no token counter (Transcript only has from_dict/to_dict
+    # and LanguageModelSession keeps its transcript private), so usage() stays unimplemented
+    # and Kennel estimates. The window is the documented ~4k of the on-device model.
+    info = ProviderInfo(
+        name="apple", model="Apple SystemLanguageModel", mode="local", context_window_tokens=4096
+    )
 
     def __init__(self, *, deterministic: bool = False) -> None:
         """``deterministic=True`` uses greedy sampling: same input, same output (useful for evaluation)."""
