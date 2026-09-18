@@ -144,6 +144,61 @@ def test_interactive_eof_exits_cleanly(meeting_ws):
     assert p.returncode == 0 and p.stdout.startswith("Kennel")
 
 
+def _run_doctor(args, ws: Path, home: Path):
+    e = {**os.environ, "NO_COLOR": "1", "HOME": str(home)}
+    proc = subprocess.run(
+        [sys.executable, "-m", "kennel.cli.main", "doctor", *args],
+        cwd=ws,
+        capture_output=True,
+        text=True,
+        env=e,
+        timeout=60,
+    )
+    return proc
+
+
+def test_doctor_mock_provider_exits_0(meeting_ws, tmp_path):
+    p = _run_doctor(["--provider", "mock"], meeting_ws, tmp_path / "home")
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.startswith("Kennel ")
+    assert "✓ Python" in p.stdout
+    assert "effective: tools=" in p.stdout
+
+
+def test_doctor_json_is_parseable(meeting_ws, tmp_path):
+    p = _run_doctor(["--provider", "mock", "--json"], meeting_ws, tmp_path / "home")
+    assert p.returncode == 0, p.stderr
+    payload = json.loads(p.stdout)
+    assert payload["ok"] is True and "checks" in payload
+
+
+def test_doctor_invalid_project_config_exits_1_but_continues(meeting_ws, tmp_path):
+    (meeting_ws / "kennel.json").write_text("{not valid json")
+    p = _run_doctor(["--provider", "mock"], meeting_ws, tmp_path / "home")
+    assert p.returncode == 1
+    assert "✗" in p.stdout and "✓ Python" in p.stdout  # other checks still ran
+
+
+def test_doctor_does_not_break_existing_parsing(meeting_ws):
+    """Adding the `doctor` subcommand must not regress how `.`, a path, or `-p` parse (AC-4)."""
+
+    def run(argv, stdin=""):
+        e = {**os.environ, "NO_COLOR": "1", "KENNEL_MOCK_SCRIPT": json.dumps({"turns": ["ok"]})}
+        return subprocess.run(
+            [sys.executable, "-m", "kennel.cli.main", *argv, "--provider", "mock"],
+            cwd=meeting_ws,
+            input=stdin,
+            capture_output=True,
+            text=True,
+            env=e,
+            timeout=60,
+        )
+
+    assert run([".", "-p", "x"]).returncode == 0
+    assert run([str(meeting_ws), "-p", "hi"]).returncode == 0
+    assert run(["-p", "hi"], stdin="").returncode == 0
+
+
 def test_workspace_missing(tmp_path):
     p = run_cli(["-p", "x"], tmp_path / "nope")
     assert p.returncode == 1 and "Workspace does not exist" in p.stderr

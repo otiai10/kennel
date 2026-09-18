@@ -30,7 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="kennel",
         description="Kennel: a local tool-using agent on Apple Foundation Models.",
-        epilog="Examples:\n  kennel .\n  kennel ~/meetings\n  kennel -p 'Read the README and explain this project'",
+        epilog="Examples:\n  kennel .\n  kennel ~/meetings\n  kennel -p 'Read the README and explain this project'"
+        "\n  kennel doctor              # check that this machine can run Kennel",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("workspace", nargs="?", default=".", help="workspace directory (default: current directory)")
@@ -183,7 +184,31 @@ def build_agent(args: argparse.Namespace, prompter: ConsolePrompter | None) -> A
     )
 
 
+def build_doctor_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="kennel doctor",
+        description="Check that Kennel can run on this machine and summarize its effective configuration.",
+    )
+    p.add_argument("workspace", nargs="?", default=".", help="workspace directory to check (default: current directory)")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--provider", choices=("apple", "mock"), default="apple", help=argparse.SUPPRESS)
+    return p
+
+
+def run_doctor(argv: list[str]) -> int:
+    from .doctor import render_json, render_text, run_checks
+
+    args = build_doctor_parser().parse_args(argv)
+    checks = run_checks(args.workspace, args.provider)
+    ok = all(c.ok for c in checks)
+    print(render_json(checks, ok) if args.json else render_text(checks))
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "doctor":
+        return run_doctor(argv[1:])
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     machine = args.output_format != "text" or args.json_schema is not None
