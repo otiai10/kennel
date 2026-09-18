@@ -47,7 +47,9 @@ hooks only tighten: an `Allow` still goes through the normal permission check, a
 thing it can skip is the interactive prompt (`Allow(remember="session")` — the same grant
 the user could give from the prompt). Hook-rewritten arguments are re-validated and still
 resolved through the workspace boundary. A hook that raises fails the tool call rather than
-being ignored, so a crashing policy cannot silently disable itself.
+being ignored, so a crashing policy cannot silently disable itself. That guarantee covers
+`before_tool` and `after_tool`; a `before_prompt` hook that raises currently propagates its
+own exception out of `Session.run()` instead (tracked in issue #23).
 
 Hooks are application code running in the same process, not a confined extension point.
 `HookContext` hands them the live `PermissionManager` and the `Tool`, so a hook *can* widen

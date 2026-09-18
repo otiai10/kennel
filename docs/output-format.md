@@ -101,10 +101,12 @@ The fields of `kennel.ToolCallRecord`:
 | `timestamp` | number | Unix seconds, milliseconds precision |
 | `data` | object | per-type payload; keys vary and may grow |
 
-Event types: `session.started`, `session.completed`, `session.failed`, `model.started`,
-`model.delta`, `model.completed`, `model.nudged`, `tool.requested`,
+Event types: `session.started`, `session.completed`, `session.failed`, `session.cancelled`,
+`model.started`, `model.delta`, `model.completed`, `model.nudged`, `tool.requested`,
 `permission.requested`, `permission.denied`, `tool.started`, `tool.completed`,
-`tool.failed`, `context.compacted`.
+`tool.failed`, `tool.blocked`, `context.compacted`. `session.cancelled` follows an
+interrupted turn and `tool.blocked` a call a `before_tool` hook denied; both are the
+`EventType` members of `kennel.events`, which is the authoritative list.
 
 `model.delta` carries `{"text": "..."}` — the generated fragment. Guided generation arrives
 whole, so a `--json-schema` turn emits exactly one `model.delta` holding the document. Every
