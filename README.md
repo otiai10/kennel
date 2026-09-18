@@ -97,6 +97,7 @@ kennel -p "Read the README and explain this project"   # one-shot
 | `--allow-web` | enable the `web` tool (asks; needs a configured search provider) |
 | `--non-interactive` | never prompt; anything that would ask is denied |
 | `--max-tool-calls N` | tool call budget per turn (default 32) |
+| `--output-format FORMAT` | with `-p`: `text` (default), `json`, `stream-json` |
 | `--verbose` | show tool output sizes and timings |
 | `--trace` | write every agent event as JSON lines to stderr |
 
@@ -116,6 +117,23 @@ context: 12%
 turns: 1
 compactions: 0
 ```
+
+For scripts and other processes, `-p` can print machine-readable JSON instead of the human
+rendering:
+
+```bash
+kennel . -p "summarize the README" --output-format json
+# {"type":"result","text":"...","stop_reason":"end_turn","is_error":false,"duration_ms":1234, ...}
+
+kennel . -p "summarize the README" --output-format stream-json
+# {"type":"session.started","session_id":"...","timestamp":...,"data":{...}}
+# {"type":"model.delta","session_id":"...","timestamp":...,"data":{"text":"..."}}
+# {"type":"result", ...}
+```
+
+In both formats stdout is JSON only; diagnostics stay on stderr. The keys, the event types
+and the versioning promise are documented in [docs/output-format.md](docs/output-format.md).
+
 
 Every tool call is shown as one line (`● Read transcripts/2026-09-16.txt [1-50]`). Mutations
 ask first:
@@ -144,9 +162,10 @@ asyncio.run(main())
 ```
 
 `Agent.run()` returns an `AgentResult` (`text`, `stop_reason`, `tool_calls`, `usage`,
-`session_id`). `usage` is a `Usage` (`input_tokens`, `output_tokens`, `estimated`); on the
-on-device model it is estimated, because the SDK exposes no token counter. Multi-turn
-conversations use a session:
+`session_id`, `duration_ms`, `is_error`, `structured_output`, `compactions`). `usage` is a
+`Usage` (`input_tokens`, `output_tokens`, `estimated`); on the on-device model it is estimated,
+because the SDK exposes no token counter. `result.to_dict()` gives the same JSON object the CLI
+prints with `--output-format json`. Multi-turn conversations use a session:
 
 ```python
 session = agent.new_session()
@@ -350,7 +369,7 @@ src/kennel/
   registry.py tools/                  tool interface and built-ins (glob grep read write edit shell web)
   providers/                          provider abstraction, AppleProvider, MockProvider
   context.py config.py events.py      chunking/compaction, JSON config, event bus
-  cli/                                argparse CLI and renderer
+  cli/                                argparse CLI, renderer, JSON output
 tests/{unit,providers,e2e,integration}
 examples/                             meeting_summary.py, repo_qa.py
 spikes/                               Phase 0 SDK experiments (not production code)

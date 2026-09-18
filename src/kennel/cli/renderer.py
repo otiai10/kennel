@@ -39,13 +39,18 @@ class Style:
 
 
 class Renderer:
-    """Prints one line per tool call and streams the answer, keeping the two apart."""
+    """Prints one line per tool call and streams the answer, keeping the two apart.
 
-    def __init__(self, out: IO[str] = sys.stdout, err: IO[str] = sys.stderr, *, verbose: bool = False, trace: bool = False, color: bool = True) -> None:
+    With ``quiet`` nothing is written to stdout (``--output-format json`` owns it);
+    ``--trace`` and ``error()`` still write to stderr.
+    """
+
+    def __init__(self, out: IO[str] = sys.stdout, err: IO[str] = sys.stderr, *, verbose: bool = False, trace: bool = False, color: bool = True, quiet: bool = False) -> None:
         self.out = out
         self.err = err
         self.verbose = verbose
         self.trace = trace
+        self.quiet = quiet
         self.style = Style(color)
         self._state = "idle"  # idle | tools | text
         self._lock = threading.Lock()
@@ -60,6 +65,8 @@ class Renderer:
         if self.trace:
             self.err.write(json.dumps({"t": round(event.timestamp, 3), "type": event.type, **event.data}, ensure_ascii=False, default=str) + "\n")
             self.err.flush()
+        if self.quiet:
+            return
         s = self.style
         t = event.type
         d = event.data
@@ -89,7 +96,7 @@ class Renderer:
     # -- answer streaming --------------------------------------------------------
 
     def delta(self, text: str) -> None:
-        if not text:
+        if not text or self.quiet:
             return
         with self._lock:
             if self._state == "tools":
@@ -100,6 +107,8 @@ class Renderer:
             self._last_char = text[-1]
 
     def finish_answer(self) -> None:
+        if self.quiet:
+            return
         with self._lock:
             if self._state != "idle" and self._last_char != "\n":
                 self.out.write("\n")
@@ -110,6 +119,8 @@ class Renderer:
     # -- misc ----------------------------------------------------------------------
 
     def note(self, text: str) -> None:
+        if self.quiet:
+            return
         self.finish_answer()
         self.out.write(self.style.dim(text) + "\n")
         self.out.flush()
