@@ -330,7 +330,7 @@ class Session:
                         "the conversation. Ask about a narrower range or fewer files."
                     ) from None
                 attempt += 1
-                await self._compact()
+                await self.compact()
             except asyncio.TimeoutError:
                 stop_reason = "timeout"
                 await self._drop_provider()
@@ -483,8 +483,14 @@ class Session:
             return ""
         return compact_history([HistoryTurn(t.prompt, t.response) for t in self.history])
 
-    async def _compact(self) -> None:
-        """Replace the provider session with a fresh one seeded by a compact history."""
+    async def compact(self) -> bool:
+        """Replace the provider session with a fresh one seeded by a compact summary of the history.
+
+        Returns ``False`` (no-op, no event emitted) if there is no history to compact.
+        """
+        if not self.history:
+            return False
         await self._drop_provider()
         self.compactions += 1
         self._emit(EventType.CONTEXT_COMPACTED, turns=len(self.history))
+        return True

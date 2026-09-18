@@ -210,6 +210,29 @@ async def test_streaming_deltas(meeting_ws):
     assert [e.type for e in events].count(EventType.MODEL_DELTA) == len(deltas)
 
 
+async def test_explicit_compact(meeting_ws):
+    agent, provider, events = make_agent(meeting_ws, ["one", "two", "three"])
+    session = agent.new_session()
+    await session.run("q1")
+    await session.run("q2")
+    compacted = await session.compact()
+    assert compacted is True and session.compactions == 1
+    assert EventType.CONTEXT_COMPACTED in [e.type for e in events]
+    result = await session.run("q3")
+    assert result.text == "three" and len(provider.sessions) == 2
+    assert "Summary of the conversation so far" in provider.sessions[1].instructions
+    await session.close()
+
+
+async def test_compact_is_noop_without_history(meeting_ws):
+    agent, _, events = make_agent(meeting_ws, [])
+    session = agent.new_session()
+    compacted = await session.compact()
+    assert compacted is False and session.compactions == 0
+    assert EventType.CONTEXT_COMPACTED not in [e.type for e in events]
+    await session.close()
+
+
 async def test_multi_turn_session_and_clear(meeting_ws):
     agent, provider, _ = make_agent(meeting_ws, ["one", "two", "three"])
     session = agent.new_session()
