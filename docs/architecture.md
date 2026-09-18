@@ -68,3 +68,30 @@ Hooks (`src/kennel/hooks.py`) are the opposite kind of callback: they decide. `b
 ## Providers
 
 `ModelProvider.create_session()` returns a `ProviderSession` with `respond`, `stream`, optional `respond_structured` and `usage`, and `close`. `ProviderInfo` declares `name`, `model`, `mode` (`local` means inference and data stay on this machine; anything else must say so) and `context_window_tokens`. `MockProvider` scripts turns, tool calls, structured values and reported usage for the test suite (`tests/providers/`).
+
+Providers are chosen by name, and `kennel.providers.registry` is the only place that maps a
+name to an implementation: a static dict of `ProviderSpec(name, factory, doctor_checks)` plus
+`register()`, shared by `Agent`, the CLI and `kennel doctor` (entry points are deliberately not
+read). `factory(**options)` takes provider-specific keyword arguments; `doctor_checks(**options)`
+is optional and returns the `Check`s (`kennel.diagnostics`) that `kennel doctor` shows for that
+provider — the `apple_fm_sdk` and model-availability checks live with `AppleProvider`.
+
+```python
+from kennel import ProviderSpec, register_provider, create_provider
+
+register_provider(ProviderSpec("echo", lambda **options: EchoProvider(**options)))
+provider = create_provider("echo")
+```
+
+The selection is configured with two keys, `provider` (a name) and `providers` (options per
+name), so switching with `--provider <name>` keeps each provider's options where they are:
+
+```json
+{ "provider": "mock", "providers": { "mock": { "script": "{\"turns\": [\"hi\"]}" } } }
+```
+
+`Agent(provider=)` takes a `ModelProvider` instance, a name, or `None` (use `provider` from the
+config, default `apple`); an instance always wins. Precedence is the usual one —
+`--provider` > `Agent(provider=)` > `./kennel.json` > user config > `apple` — and it is
+implemented once, in `KennelConfig.merged()`. Choosing `apple` where `apple_fm_sdk` cannot be
+imported fails immediately with `ModelUnavailableError`, whose hint points at `--provider`.
