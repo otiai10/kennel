@@ -23,8 +23,10 @@ classifiers = [
 ]
 # apple-fm-sdk 0.2.1 needs the macOS 27 SDK (Xcode 27); with Xcode 26.x its Swift bridge
 # fails to build. Lift the upper bound once a matching Xcode is common.
+# The darwin marker keeps the default Mac install unchanged while letting Kennel install on
+# other platforms (no Swift build), where a non-Apple provider is selected with --provider.
 dependencies = [
-    "apple-fm-sdk>=0.2.0,<0.2.1",
+    "apple-fm-sdk>=0.2.0,<0.2.1; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
