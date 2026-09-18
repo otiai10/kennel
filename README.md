@@ -103,7 +103,6 @@ kennel -p "Read the README and explain this project"   # one-shot
 | `--allow-web` | enable the `web` tool (asks; needs a configured search provider) |
 | `--non-interactive` | never prompt; anything that would ask is denied (= `--permission-mode dont-ask`) |
 | `--instructions TEXT\|@FILE` | append text (or a file's contents) to the default instructions |
-
 | `--system-prompt TEXT\|@FILE` | replace the default instructions entirely (or a file's contents) |
 | `--max-tool-calls N` | tool call budget per turn (default 32) |
 | `--output-format FORMAT` | with `-p`: `text` (default), `json`, `stream-json` |
@@ -154,14 +153,7 @@ kennel ~/meetings -p "extract the decisions from the latest transcript" --json-s
 
 The three older flags are sugar for a mode, so `--permission-mode` cannot be combined with
 them. `bypass` allows everything including `shell` and prints a warning line in the header.
-
-| Mode | read tools | `write` / `edit` | `shell` | `web` | Tool set |
-| --- | --- | --- | --- | --- | --- |
-| `read-only` | allow | deny | deny | deny | `glob`, `grep`, `read` only |
-| `default` | allow | ask | ask | deny | all |
-| `accept-edits` | allow | allow | ask | ask | all |
-| `dont-ask` | allow | deny | deny | deny | all |
-| `bypass` | allow | allow | allow | allow | all |
+What each mode allows, tool by tool, is tabulated in [SECURITY.md](SECURITY.md#what-is-enforced).
 
 `/compact` summarizes the conversation so far and starts a fresh model session seeded with
 that summary (this happens automatically when a turn no longer fits the context window;
@@ -293,7 +285,7 @@ agent = Agent(".", tools=["glob", "grep", "read", "write", "edit", "shell"],
 `deny` always wins, whether it came from `shell` or from `shell(rm *)`. Otherwise a matching
 specifier rule beats the bare tool rule, and `ask` beats `allow` among equally specific
 matches. `permission_mode` is one of `read-only`, `default`, `accept-edits`, `dont-ask`,
-`bypass` (see the table above); `read-only` also restricts the tool set.
+`bypass` (see the table in [SECURITY.md](SECURITY.md)); `read-only` also restricts the tool set.
 
 ### Hooks
 
@@ -393,8 +385,8 @@ default instructions outright; the workspace overview is still appended unless
 `include_workspace_overview=False`. Replacing the default instructions removes the
 glob-then-read procedure that keeps the on-device model calling tools instead of guessing, so
 tool use can become unreliable — only do this if your own instructions cover that ground.
-`AppleProvider(deterministic=True)`
-switches to greedy sampling so a given prompt yields the same trace and answer every run,
+
+`AppleProvider(deterministic=True)` switches to greedy sampling so a given prompt yields the same trace and answer every run,
 which is what you want for evaluations:
 
 ```python
@@ -505,6 +497,10 @@ spikes/                               Phase 0 SDK experiments (not production co
 
 ## Status
 
-v0.0.3. Read-only agent, permission-gated mutation tools, CLI, MockProvider-based test
-suite, structured meeting summary example. Not yet: web search provider, persistent
-sessions, alternative models, MCP, subagents, sandboxed shell.
+v0.0.3 plus the unreleased main branch: interactive and one-shot CLI with `kennel doctor`,
+machine-readable output (`--output-format`, `--json-schema`), permission modes and rule
+syntax, hooks, `Session.stream()` / `interrupt()` / `context_usage()`, MockProvider-based test
+suite, structured meeting summary example. Not yet: web search provider, persistent sessions,
+alternative models, MCP, subagents, sandboxed shell. Design principles live in
+[docs/constitution.md](docs/constitution.md); the comparison with Claude Code that drove the
+current roadmap is in `docs/history/`.
