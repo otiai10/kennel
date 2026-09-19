@@ -80,7 +80,9 @@ class Renderer:
         elif t == EventType.PERMISSION_DENIED:
             self._line(s.yellow(f"  ⊘ denied: {d.get('summary', '')}"))
         elif t == EventType.MODEL_NUDGED:
-            self._line(s.dim("  ↻ carrying out the described steps instead of narrating them"))
+            rule = d.get("rule")
+            suffix = f" (rule: {rule})" if rule else ""
+            self._line(s.dim(f"  ↻ carrying out the described steps instead of narrating them{suffix}"))
         elif t == EventType.CONTEXT_COMPACTED:
             self._line(s.dim("  ↻ context compacted, retrying"))
 
