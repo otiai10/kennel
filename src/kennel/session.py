@@ -63,7 +63,7 @@ class AgentResult:
     """
 
     text: str
-    stop_reason: str  # end_turn | tool_limit | timeout
+    stop_reason: str  # end_turn | tool_limit | timeout | error
     tool_calls: list[ToolCallRecord]
     usage: Usage | None
     session_id: str
@@ -72,6 +72,7 @@ class AgentResult:
     structured_output: dict[str, Any] | None = None
     compactions: int = 0
     error: str | None = None
+    failure: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """A JSON-serializable result record (schema: ``docs/output-format.md``)."""
@@ -87,11 +88,14 @@ class AgentResult:
             "usage": asdict(self.usage) if self.usage is not None else None,
             "structured_output": self.structured_output,
             "compactions": self.compactions,
+            "failure": self.failure,
         }
 
 
 @dataclass
 class Turn:
+    """One exchange as it was recorded. ``stop_reason`` ``"error"`` marks a turn that failed."""
+
     prompt: str
     response: str
     stop_reason: str
@@ -112,6 +116,9 @@ class Session:
         self.history: list[Turn] = []
         self.compactions = 0
         self.last_result: AgentResult | None = None
+        #: Facts about the turn that failed most recently, as ``session.failed`` carried
+        #: them (``None`` until a turn fails). Counted or reported only: see :meth:`_fail_turn`.
+        self.last_failure: dict[str, Any] | None = None
         self._provider_session: ProviderSession | None = None
         self._window_instructions = agent.instructions
         self._window_turn_start = 0
@@ -256,6 +263,46 @@ class Session:
             total += sum(estimate_tokens_from_bytes(c.output_bytes) for c in turn.tool_calls)
         return total
 
+    # -- failing --------------------------------------------------------------
+
+    async def _fail_turn(
+        self,
+        exc: BaseException,
+        prompt: str,
+        text: str,
+        started: float,
+        before: ContextUsage,
+    ) -> None:
+        """Record a turn that failed, retire the provider session and emit ``session.failed``.
+
+        The turn lands in :attr:`history` with ``stop_reason="error"`` and the tool calls
+        it did make, so ``/usage``, ``/status`` and :meth:`context_usage` stop pretending
+        it never happened. The live provider session is retired through :meth:`compact`
+        because the provider gives no way to tell whether the failed prompt and its tool
+        output stayed in its transcript; the next turn resumes from a summary instead of
+        from an undefined state.
+
+        Callers must raise afterwards: this reports the failure, it does not swallow it.
+        """
+        records = self.runner.turn_records()
+        self.history.append(Turn(prompt, text, "error", records))
+        failure = {
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "status": getattr(exc, "status", None),
+            "provider_error": getattr(exc, "provider_error", None),
+            "tool_output_bytes": sum(record.output_bytes for record in records),
+            "tool_calls": len(records),
+            "context_tokens_before": before.used_tokens,
+            "context_window_tokens": before.window_tokens,
+            "estimated": before.estimated,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+        }
+        self.last_failure = failure
+        if self._provider_session is not None:
+            await self.compact()
+        self._emit(EventType.SESSION_FAILED, **failure)
+
     # -- running --------------------------------------------------------------
 
     async def run(
@@ -292,8 +339,10 @@ class Session:
                 tools=sorted(self.agent.tools),
             )
         self.runner.begin_turn()
+        self.last_failure = None
         self._emit(EventType.MODEL_STARTED, prompt_chars=len(prompt))
         started = time.perf_counter()
+        before = self.context_usage()  # what the window held before this request, for _fail_turn
         stop_reason = "end_turn"
         text = ""
         attempt = 0
@@ -321,13 +370,16 @@ class Session:
             try:
                 text = await asyncio.wait_for(generate(), timeout)
                 break
-            except ContextLimitError:
+            except ContextLimitError as exc:
                 if attempt >= 1 or not self.history:
-                    self._emit(EventType.SESSION_FAILED, error="context limit")
-                    raise ContextLimitError(
+                    failed = ContextLimitError(
                         "The request does not fit the on-device model's context window, even after compacting "
-                        "the conversation. Ask about a narrower range or fewer files."
-                    ) from None
+                        "the conversation. Ask about a narrower range or fewer files.",
+                        status=exc.status,
+                        provider_error=exc.provider_error,
+                    )
+                    await self._fail_turn(failed, prompt, text, started, before)
+                    raise failed from None
                 attempt += 1
                 await self.compact()
             except asyncio.TimeoutError:
@@ -337,13 +389,14 @@ class Session:
             except asyncio.CancelledError:
                 await self._abandon_turn(text)
             except KennelError as exc:
-                self._emit(EventType.SESSION_FAILED, error=str(exc))
+                await self._fail_turn(exc, prompt, text, started, before)
                 raise
             except BrokenPipeError:
                 raise  # the consumer's output went away; not a model failure
             except Exception as exc:  # noqa: BLE001 - provider bug surfaced as a KennelError
-                self._emit(EventType.SESSION_FAILED, error=str(exc))
-                raise ProviderError(f"The model request failed: {exc}") from exc
+                failed = ProviderError(f"The model request failed: {exc}", provider_error=str(exc))
+                await self._fail_turn(failed, prompt, text, started, before)
+                raise failed from exc
         if schema is None and stop_reason == "end_turn" and self._should_nudge(text):
             # The model narrated tool steps instead of taking them: continue once.
             self._emit(EventType.MODEL_NUDGED, chars=len(text))
