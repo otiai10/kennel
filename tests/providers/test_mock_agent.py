@@ -363,6 +363,40 @@ async def test_nudge_only_once_and_not_for_plain_answers(meeting_ws):
     assert len(provider.sessions[0].prompts) == 1
 
 
+async def test_nudged_event_carries_rule(meeting_ws):
+    """AC-2/AC-4: `model.nudged` reports which rule fired, for the CLI's `↻` line."""
+    agent, provider, events = make_agent(meeting_ws, [NARRATION, [ToolCall("glob", {"pattern": "*.txt"}), Text("found it")]])
+    await agent.run("メールを放置している気がする")
+    nudged = [e for e in events if e.type == EventType.MODEL_NUDGED][0]
+    assert nudged.data["rule"] == "code_block"
+
+    agent, provider, events = make_agent(meeting_ws, ["このプロジェクトに関連するファイルは以下です。", "translated"])
+    await agent.run("x")
+    nudged = [e for e in events if e.type == EventType.MODEL_NUDGED][0]
+    assert nudged.data["rule"] == "file_mention"
+
+
+async def test_nudge_skipped_right_after_a_tool_turn(meeting_ws):
+    """AC-1: a turn immediately after one that called a tool answers from what it
+    just saw (e.g. a translation request), so a file mention must not re-trigger
+    the nudge and repeat the previous answer (#33)."""
+    agent, provider, events = make_agent(
+        meeting_ws,
+        [
+            [ToolCall("glob", {"pattern": "*.py"}), Text("examples/meeting_summary.py が該当します。")],
+            "このファイルについての説明を日本語に翻訳しました。",
+        ],
+    )
+    session = agent.new_session()
+    first = await session.run("このプロジェクトに関連するPythonファイルは？")
+    assert [c.name for c in first.tool_calls] == ["glob"]
+    events.clear()
+    second = await session.run("日本語で")
+    assert second.text == "このファイルについての説明を日本語に翻訳しました。"
+    assert len(provider.sessions[0].prompts) == 2  # no extra nudge re-prompt appended
+    assert EventType.MODEL_NUDGED not in [e.type for e in events]
+
+
 async def test_nudge_disabled_by_config_or_without_tools(meeting_ws):
     agent, provider, _ = make_agent(meeting_ws, [NARRATION], config=KennelConfig(nudge_narration=False))
     assert (await agent.run("x")).text == NARRATION and len(provider.sessions[0].prompts) == 1
