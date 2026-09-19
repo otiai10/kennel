@@ -17,7 +17,18 @@ class ConfigurationError(KennelError):
 
 
 class ProviderError(KennelError):
-    """The model provider failed."""
+    """The model provider failed.
+
+    ``status`` and ``provider_error`` carry what the provider itself reported, and
+    only that: a provider that reports no status code leaves ``status`` as ``None``
+    rather than having Kennel guess one. ``provider_error`` keeps the provider's
+    own wording when Kennel replaces the message with a friendlier one.
+    """
+
+    def __init__(self, message: str, *, status: int | None = None, provider_error: str | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+        self.provider_error = provider_error
 
 
 class ModelUnavailableError(ProviderError):
