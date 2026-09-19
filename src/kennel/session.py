@@ -9,6 +9,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from .context import (
@@ -19,7 +20,7 @@ from .context import (
     looks_like_tool_narration,
 )
 from .errors import ContextLimitError, KennelError, ProviderError, TurnCancelledError
-from .events import Event, EventType
+from .events import Event, EventType, JsonlEventLog, session_log_path
 from .hooks import run_hook
 from .providers.base import ProviderSession, Usage
 from .runner import ToolCallRecord, ToolRunner
@@ -119,6 +120,11 @@ class Session:
         #: Facts about the turn that failed most recently, as ``session.failed`` carried
         #: them (``None`` until a turn fails). Counted or reported only: see :meth:`_fail_turn`.
         self.last_failure: dict[str, Any] | None = None
+        #: Where this session's event log goes, or ``None`` when logging is off
+        #: (``logging.events: false`` / ``--no-log``). The file appears with the first turn.
+        self.log_path: Path | None = session_log_path(self.id) if agent.config.log_events else None
+        self._event_log: JsonlEventLog | None = None
+        self._stop_logging: Callable[[], None] | None = None
         self._provider_session: ProviderSession | None = None
         self._window_instructions = agent.instructions
         self._window_turn_start = 0
@@ -177,6 +183,27 @@ class Session:
         await self._drop_provider()
         if self._started and not self._failed:
             self._emit(EventType.SESSION_COMPLETED, turns=len(self.history))
+        self._close_event_log()  # after the closing event, so the log ends with it
+
+    def _open_event_log(self) -> None:
+        """Start writing this session's events to :attr:`log_path` (a no-op when logging is off).
+
+        Opened with the first turn rather than with the session, so a session that is never
+        run leaves no file behind. Idempotent, and a log that cannot be opened disables
+        itself and warns rather than raising.
+        """
+        if self.log_path is None or self._event_log is not None:
+            return
+        self._event_log = JsonlEventLog(self.log_path, session_id=self.id)
+        self._stop_logging = self.agent.events.subscribe(self._event_log)
+
+    def _close_event_log(self) -> None:
+        if self._stop_logging is not None:
+            self._stop_logging()
+            self._stop_logging = None
+        if self._event_log is not None:
+            self._event_log.close()
+            self._event_log = None
 
     async def clear(self) -> None:
         """Forget the conversation (keeps configuration and the session id)."""
@@ -195,6 +222,7 @@ class Session:
             "model": self.agent.provider.info.model,
             "mode": self.agent.provider.info.mode,
             "context": self.context_usage().summary(),
+            "log": str(self.log_path) if self.log_path is not None else "off",
             "workspace": str(self.agent.workspace.root),
         }
 
@@ -330,6 +358,7 @@ class Session:
         self._task = asyncio.current_task()
         self._loop = asyncio.get_running_loop()
         self._interrupted = False
+        self._open_event_log()  # idempotent; before the first event so it lands in the file
         if not self._started:
             self._started = True
             self._emit(
