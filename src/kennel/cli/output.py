@@ -41,7 +41,7 @@ class MachineOutput(ABC):
     @abstractmethod
     def result(self, result: AgentResult) -> None: ...
 
-    def error(self, message: str, *, stop_reason: str = "error") -> None:
+    def error(self, message: str, *, stop_reason: str = "error", failure: dict[str, Any] | None = None) -> None:
         return None  # the message is on stderr already
 
 
@@ -88,8 +88,12 @@ class JsonOutput(MachineOutput):
     def result(self, result: AgentResult) -> None:
         self._write(result.to_dict())
 
-    def error(self, message: str, *, stop_reason: str = "error") -> None:
-        """Report a failure as a result record; the exit code is unchanged."""
+    def error(self, message: str, *, stop_reason: str = "error", failure: dict[str, Any] | None = None) -> None:
+        """Report a failure as a result record; the exit code is unchanged.
+
+        ``failure`` is ``Session.last_failure`` when a turn failed: the same facts the
+        ``session.failed`` event carried, so a parser gets them without reading events.
+        """
         self._write(
             AgentResult(
                 text="",
@@ -99,6 +103,7 @@ class JsonOutput(MachineOutput):
                 session_id=self._session_id,
                 is_error=True,
                 error=message,
+                failure=failure,
             ).to_dict()
         )
 

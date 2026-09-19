@@ -5,7 +5,10 @@ steps (:class:`ToolCall`, :class:`Text`, :class:`Raise`, :class:`Sleep`), or an
 async callable ``(prompt, invoke) -> str``.
 
 :meth:`MockProvider.from_json` reads the same script from JSON (``KENNEL_MOCK_SCRIPT``):
-``{"turns": [...], "structured": [...], "available": false}``.
+``{"turns": [...], "structured": [...], "available": false}``. A step is
+``{"tool": name, "arguments": {...}}``, ``{"text": "..."}``, ``{"sleep": seconds}`` or
+``{"error": "message", "status": 255}`` (a :class:`~kennel.ProviderError`, so a CLI run can
+be made to fail the way a provider fails).
 """
 
 from __future__ import annotations
@@ -163,5 +166,7 @@ class MockProvider(ModelProvider):
                     steps.append(Text(step["text"]))
                 elif "sleep" in step:
                     steps.append(Sleep(float(step["sleep"])))
+                elif "error" in step:
+                    steps.append(Raise(ProviderError(str(step["error"]), status=step.get("status"))))
             turns.append(steps)
         return cls(turns, structured=obj.get("structured"), available=bool(obj.get("available", True)))
