@@ -86,6 +86,35 @@ def test_stream_json_emits_one_json_per_line(meeting_ws):
     assert not any("content" in json.dumps(line["data"]) for line in lines if line["type"].startswith("tool."))
 
 
+#: What `tool.completed` carries (docs/output-format.md, "Event objects").
+TOOL_COMPLETED_KEYS = {
+    "tool",
+    "summary",
+    "output_bytes",
+    "estimated_tokens",
+    "context_window_tokens",
+    "window_exceeded",
+    "truncated",
+    "duration_ms",
+    "metadata",
+}
+
+
+def test_stream_json_tool_completed_reports_the_size_in_bytes_and_tokens(meeting_ws):
+    """AC-4: the estimate and the window comparison are on the record, not only in the CLI."""
+    (meeting_ws / "big.txt").write_text("x" * 20_000)
+    script = {"turns": [[{"tool": "read", "arguments": {"path": "big.txt"}}, {"text": "done"}]]}
+    p = run_cli(["-p", "read it", "--output-format", "stream-json"], meeting_ws, script=script)
+    assert p.returncode == 0, p.stderr
+    lines = [json.loads(line) for line in p.stdout.splitlines()]
+    data = next(line["data"] for line in lines if line["type"] == "tool.completed")
+    assert set(data) == TOOL_COMPLETED_KEYS
+    assert data["output_bytes"] > 20_000
+    assert data["estimated_tokens"] == -(-data["output_bytes"] // 4)  # ceil(bytes / 4)
+    assert data["context_window_tokens"] == 4096 and data["window_exceeded"] is True
+    assert "(context" not in p.stdout  # the human lines stay out of a machine format
+
+
 def test_stream_json_can_be_combined_with_trace(meeting_ws):
     p = run_cli(["-p", "x", "--output-format", "stream-json", "--trace"], meeting_ws)
     assert p.returncode == 0, p.stderr

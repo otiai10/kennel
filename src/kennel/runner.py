@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -25,7 +26,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from .context import truncate_text
+from .context import estimate_tokens_from_bytes, truncate_text
 from .errors import KennelError, ToolArgumentError
 from .events import EventBus, EventType
 from .hooks import HookContext, Hooks, ToolCallRequest, run_hook, select_hooks
@@ -59,7 +60,12 @@ class ToolRunner:
         max_tool_calls: int = 32,
         max_repeats: int = 3,
         hooks: Hooks | None = None,
+        context_window_tokens: int | None = None,
     ) -> None:
+        """``context_window_tokens`` is the provider's declared window, used to say on
+        ``tool.completed`` whether a single result is already too big for it. ``None`` (the
+        provider declares no window) means the question cannot be answered, not that the
+        answer is no."""
         self._tools = dict(tools)
         self._context = context
         self._events = events
@@ -68,6 +74,7 @@ class ToolRunner:
         self._hooks = hooks if hooks is not None else Hooks()
         self.max_tool_calls = max_tool_calls
         self.max_repeats = max_repeats
+        self.context_window_tokens = context_window_tokens
         self._lock = threading.Lock()
         self.records: list[ToolCallRecord] = []
         self._turn_records: list[ToolCallRecord] = []
@@ -209,11 +216,19 @@ class ToolRunner:
         record = self._record(
             ToolCallRecord(name, args, summary, "ok", len(content.encode()), truncated, duration, None, dict(result.metadata))
         )
+        # An estimate, and named as one: the on-device provider counts no tokens, so this is
+        # what lets a caller (and the CLI) see a result that cannot fit before the model chokes
+        # on it. The comparison is about this one result, not about the live context.
+        estimated_tokens = math.ceil(estimate_tokens_from_bytes(record.output_bytes))
+        window = self.context_window_tokens
         self._emit(
             EventType.TOOL_COMPLETED,
             tool=name,
             summary=summary,
             output_bytes=record.output_bytes,
+            estimated_tokens=estimated_tokens,
+            context_window_tokens=window,
+            window_exceeded=window is not None and estimated_tokens > window,
             truncated=truncated,
             duration_ms=duration,
             metadata=dict(result.metadata),

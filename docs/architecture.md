@@ -61,7 +61,7 @@ For every tool call `ToolRunner.invoke` does, in this order:
 4. the permission decision on the arguments the tool will actually run with: `PermissionManager.decision_for(name, kind, arguments, tool.match_rule)`, then `decide()` prompts if it says `ask`
 5. `tool.execute`
 6. `after_tool` hooks, which may replace the result; the replacement is bounded like any other
-7. output bounding and the `tool.completed` / `tool.failed` event
+7. output bounding and the `tool.completed` / `tool.failed` event. `tool.completed` carries the result's size in bytes and in estimated tokens, plus `window_exceeded` for the case where that one result is already bigger than the provider's declared window — the runner is where the bytes are counted, so it is where the comparison belongs, and the CLI only draws it
 
 Step 4 is the only place the permission precedence lives (`src/kennel/permissions.py`, `decision_for`): `deny` always wins, then a matching specifier rule beats the bare tool rule, then `ask` beats `allow`. A permission mode supplies the defaults the rules layer on; what a specifier means is decided by the tool (`Tool.match_rule`, glob syntax in `src/kennel/rules.py`). Pinned by `tests/unit/test_permission_rules.py` and `tests/unit/test_hooks.py`.
 
@@ -83,7 +83,7 @@ The provider maps the SDK's context-window error to `ContextLimitError`. `Sessio
 
 ## Events and hooks
 
-`EventBus` delivers `session.*`, `model.*`, `tool.*`, `permission.*` and `context.compacted` events synchronously to subscribers, possibly from a worker thread. The list of types is `EventType` in `src/kennel/events.py`. Events carry summaries, sizes and timings, never file contents; a subscriber that raises is logged and ignored. Consumers: the CLI renderer, `--trace` (raw events on stderr), `--output-format stream-json` (documented schema in [output-format.md](output-format.md)) and `Session.stream()`.
+`EventBus` delivers `session.*`, `model.*`, `tool.*`, `permission.*` and `context.compacted` events synchronously to subscribers, possibly from a worker thread. The list of types is `EventType` in `src/kennel/events.py`. Events carry summaries, sizes and timings, never file contents; a subscriber that raises is logged and ignored. Consumers: the CLI renderer, `--trace` (raw events on stderr), `--output-format stream-json` (documented schema in [output-format.md](output-format.md)) and `Session.stream()`. A fifth consumer is `JsonlEventLog`, the subscriber that appends the flat `event_json` form to `<state_dir>/sessions/<session_id>.jsonl`; `Session` attaches one with the first turn when `config.log_events` is set and closes it after the `session.completed` event, so a session that is never run leaves no file. The CLI turns it on by default and the SDK does not, because an embedded runtime should not start writing to the user's home on its own; `state_dir()` resolves `KENNEL_STATE_DIR`, then `XDG_STATE_HOME`, then `~/.local/state`. Being an observer, a log that cannot be opened or written warns once through `logging` and then does nothing — the turn is never affected.
 
 Hooks (`src/kennel/hooks.py`) are the opposite kind of callback: they decide. `before_tool` / `after_tool` run inside `ToolRunner.invoke` and a hook that raises fails the call; `before_prompt` runs in `Session.run` and appends context to the user's prompt (not to Kennel's own re-prompts). They execute in-process with the application's own trust level, see [SECURITY.md](../SECURITY.md).
 

@@ -80,8 +80,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TEXT|@FILE",
         help="with -p: answer under a JSON schema (guided generation) instead of prose",
     )
-    p.add_argument("--verbose", action="store_true", help="show tool result sizes and diagnostics")
+    p.add_argument("--verbose", action="store_true", help="add tool timings and diagnostic logging (sizes are shown anyway)")
     p.add_argument("--trace", action="store_true", help="write every agent event as JSON to stderr")
+    p.add_argument(
+        "--no-log",
+        action="store_true",
+        help="do not keep this session's event log (= the \"logging\": {\"events\": false} config key); "
+        "the log is a local JSON Lines file under KENNEL_STATE_DIR, ~/.local/state/kennel by default",
+    )
     p.add_argument("--version", action="version", version=f"kennel {__version__}")
     return p
 
@@ -214,6 +220,12 @@ def build_agent(args: argparse.Namespace, prompter: ConsolePrompter | None) -> A
         provider=args.provider,
         providers=_provider_options_from_env(),
     )
+    # The CLI keeps a session event log by default, so a failure can be looked at afterwards;
+    # the config file can turn it off and --no-log always wins. The SDK default stays opt-in.
+    if args.no_log:
+        config = config.merged(log_events=False)
+    elif config.log_events is None:
+        config = config.merged(log_events=True)
     # The provider is left to Agent, which resolves config.provider through the registry.
     return Agent(
         args.workspace,
@@ -371,8 +383,9 @@ def run_once(
             if renderer.verbose:
                 traceback.print_exc()
         renderer.finish_answer()
-        if renderer.verbose:
-            renderer.note(f"(context: {session.context_usage().summary()})")
+        # Shown by default: an on-device window is small enough that "how much is left" is a
+        # decision the user makes every turn. note() stays quiet in the machine formats.
+        renderer.note(f"(context: {session.context_usage().summary()})")
         failure = session.last_failure
         if failed is not None:
             renderer.error(failure_line(str(failed), failure))
@@ -561,8 +574,7 @@ def run_interactive(agent: Agent, renderer: Renderer, prompter: ConsolePrompter 
                 renderer.error(failure_line(str(exc), session.last_failure))
                 continue
             renderer.finish_answer()
-            if renderer.verbose:
-                renderer.note(f"(context: {session.context_usage().summary()})")
+            renderer.note(f"(context: {session.context_usage().summary()})")
             if result is not None and result.stop_reason == "tool_limit":
                 renderer.note("(tool call limit reached; answer may be incomplete)")
             elif result is not None and result.stop_reason == "timeout":

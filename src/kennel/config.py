@@ -14,6 +14,7 @@ permission rules approved from the prompt) with the standard library alone::
         "system_prompt": "You are a release-notes assistant."
       },
       "permission_mode": "default",
+      "logging": { "events": true },
       "permissions": { "write": "ask", "shell": "ask", "shell(git *)": "allow" },
       "provider": "apple",
       "providers": { "apple": { "deterministic": false } },
@@ -55,6 +56,9 @@ class KennelConfig:
     grep_max_results: int = 100
     shell_timeout_seconds: int = 30
     nudge_narration: bool = True
+    #: Keep a session event log under the state directory. ``None`` means "not configured":
+    #: the CLI turns it on, an embedding application opts in (see ``kennel.events``).
+    log_events: bool | None = None
     permission_mode: str | None = None
     permissions: dict[str, str] = field(default_factory=dict)
     provider: str = DEFAULT_PROVIDER
@@ -152,6 +156,13 @@ def apply_config(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>"
         cfg.instructions = agent["instructions"]
     if "permission_mode" in data:
         cfg.permission_mode = PermissionMode.parse(data["permission_mode"]).value
+    logging_section = data.get("logging", {})
+    if not isinstance(logging_section, dict):
+        raise ConfigurationError(f"{source}: 'logging' must be an object")
+    if "events" in logging_section:
+        if not isinstance(logging_section["events"], bool):
+            raise ConfigurationError(f"{source}: logging.events must be true or false")
+        cfg.log_events = logging_section["events"]
     if "system_prompt" in agent:
         if not isinstance(agent["system_prompt"], str):
             raise ConfigurationError(f"{source}: agent.system_prompt must be a string")

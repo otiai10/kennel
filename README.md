@@ -124,16 +124,29 @@ kennel -p "Read the README and explain this project"   # one-shot
 | `--provider NAME` | model provider to use (default: the `provider` config key, otherwise `apple`) |
 | `--output-format FORMAT` | with `-p`: `text` (default), `json`, `stream-json` |
 | `--json-schema TEXT\|@FILE` | with `-p`: answer under a JSON schema (guided generation) |
-| `--verbose` | show tool output sizes and timings |
+| `--verbose` | add tool timings and diagnostic logging (result sizes are shown anyway) |
 | `--trace` | write every agent event as JSON lines to stderr |
+| `--no-log` | do not keep this session's event log (= `"logging": {"events": false}`) |
 
 Interactive commands: `/help`, `/status`, `/usage`, `/clear`, `/compact`, `/permissions [<tool>
-allow|ask|deny]`, `/exit`. `Ctrl-C` cancels the current answer via `Session.interrupt()` and
+allow|ask|deny]`, `/exit`. `/status` includes the path of this session's event
+log. `Ctrl-C` cancels the current answer via `Session.interrupt()` and
 returns to the prompt (twice at the prompt exits); `Ctrl-D` exits.
 
 The on-device model's context window is about 4k tokens, which is the tightest constraint in
-practice, so `/usage` shows how full it is. With `--verbose` the same line is printed after
-every answer:
+practice, so every tool result is reported with what it costs and every answer ends with how
+full the window is. A single file that cannot fit says so in yellow, before the turn fails:
+
+```text
+> read big.txt and summarize it
+● Read big.txt
+  ↳ 20,008 bytes (~5,002 tokens, exceeds the 4,096-token window)
+done
+(context: 100% of 4096 tokens (5279 tokens, estimated))
+```
+
+The token figures are estimates and say so; the on-device model exposes no token counter, and
+Kennel does not dress an estimate up as a measurement. `/usage` is the longer form:
 
 ```text
 > /usage
@@ -143,6 +156,9 @@ context: 12%
 turns: 1
 compactions: 0
 ```
+
+Both lines are human output, so `--output-format json|stream-json` suppresses them (there the
+same numbers are on the `tool.completed` records). `--verbose` only adds the timing.
 
 For scripts and other processes, `-p` can print machine-readable JSON instead of the human
 rendering:
@@ -396,6 +412,28 @@ summaries and sizes, never file contents. Subscribers only observe — to interv
 hooks (above). `Session.stream()` is the async-iterator view of the same events, for
 consumers that would rather `async for` than register a callback.
 
+### Session event log
+
+Every `kennel` run keeps its events in a local JSON Lines file, so a failure can be looked at
+after the fact instead of only while it happens:
+
+```
+~/.local/state/kennel/sessions/<session_id>.jsonl
+{"t": 1789817185.923, "type": "session.started", "session_id": "06c84876ce05", "workspace": "/Users/me/meetings", "model": "MockModel", "tools": ["glob", "grep", "read"]}
+{"t": 1789817185.924, "type": "tool.requested", "session_id": "06c84876ce05", "tool": "read", "summary": "Read transcripts/2026-09-16.txt"}
+```
+
+Each line is one event in the same flat form `--trace` writes to stderr (`t`, `type`,
+`session_id`, then the event's own data), so it carries summaries, sizes and timings and never
+file contents or generated text. The location is `KENNEL_STATE_DIR`, else
+`$XDG_STATE_HOME/kennel`, else `~/.local/state/kennel`; `/status` and `kennel doctor` print
+it. `--no-log` or `"logging": {"events": false}` turns it off. Nothing is uploaded and nothing
+is rotated for you — the files are yours to `tail`, attach to an issue or delete.
+
+In the SDK the log is **opt-in**, so embedding Kennel does not start writing files behind an
+application's back: pass `KennelConfig(log_events=True)` (or the config key) to get the same
+per-session file, or subscribe `kennel.JsonlEventLog(path)` yourself for full control.
+
 The default instructions tell the model to glob, then grep/read, then answer, and include a
 one-line overview of the workspace's top-level entries. On the on-device model this is what
 makes tool use reliable, especially for non-English prompts.
@@ -572,6 +610,7 @@ approved from the prompt, planned for a later version). All keys are optional.
     "llama-cpp": { "model_path": "~/models/Qwen3-4B-Q4_K_M.gguf", "n_ctx": 16384 }
   },
   "permission_mode": "default",
+  "logging": { "events": true },
   "permissions": {
     "write": "ask",
     "write(docs/**)": "allow",

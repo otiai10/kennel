@@ -8,6 +8,7 @@ Every check is independent and best-effort: a failure in one (for example an inv
 from __future__ import annotations
 
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from ..config import (
 )
 from ..diagnostics import Check
 from ..errors import ConfigurationError
+from ..events import state_dir
 from ..providers.registry import DEFAULT_PROVIDER, spec
 from ..registry import DEFAULT_TOOLS
 from ..workspace import Workspace, WorkspaceError
@@ -81,6 +83,24 @@ def _check_config_file(path: Path, label: str) -> Check:
     return Check(label, True, f"{label} {path} (valid)")
 
 
+def _check_event_log(cfg: KennelConfig | None) -> Check:
+    """Where session event logs go, and whether that directory can be written.
+
+    Read-only: it reports on the nearest directory that already exists rather than creating
+    anything, so running ``doctor`` leaves no state behind.
+    """
+    if cfg is not None and cfg.log_events is False:
+        return Check("event log", True, "session event log off ('logging': {'events': false})")
+    directory = state_dir() / "sessions"
+    existing = directory
+    while not existing.exists() and existing.parent != existing:
+        existing = existing.parent
+    ok = os.access(existing, os.W_OK)
+    detail = f"session event log {directory}" + ("" if ok else f" (not writable: {existing})")
+    hint = None if ok else "point KENNEL_STATE_DIR at a writable directory, or run with --no-log"
+    return Check("event log", ok, detail, hint=hint)
+
+
 def _check_workspace(workspace_arg: str) -> tuple[Check, Workspace | None]:
     try:
         ws = Workspace(workspace_arg)
@@ -130,6 +150,7 @@ def run_checks(
     if user_config is not None:
         checks.append(_check_config_file(user_config, "user config"))
     checks.append(_check_config_file(Path(workspace_arg).expanduser() / PROJECT_CONFIG_NAME, "project config"))
+    checks.append(_check_event_log(cfg))
     workspace_check, workspace = _check_workspace(workspace_arg)
     checks.append(workspace_check)
     checks.append(_check_effective(cfg, config_error, workspace))
