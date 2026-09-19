@@ -205,7 +205,7 @@ asyncio.run(main())
 ```
 
 `Agent.run()` returns an `AgentResult` (`text`, `stop_reason`, `tool_calls`, `usage`,
-`session_id`, `duration_ms`, `is_error`, `structured_output`, `compactions`). `usage` is a
+`session_id`, `duration_ms`, `is_error`, `structured_output`, `compactions`, `failure`). `usage` is a
 `Usage` (`input_tokens`, `output_tokens`) and is only filled when the provider counts tokens
 itself; on Apple's on-device model it stays `None`, because the SDK exposes no token counter.
 Kennel does not guess it per turn — use `context_usage()` below for a picture of the window.
@@ -235,7 +235,12 @@ async with agent.new_session() as session:
 
 The iterator's last event is `session.completed`, whose `data` carries `text`, `stop_reason`,
 `tool_calls` and `turns`. A provider failure is raised out of the `async for` after the
-`session.failed` event has been delivered. `Agent.stream(prompt)` is the one-shot form: it
+`session.failed` event has been delivered; that event's `data` (also `Session.last_failure`,
+and `AgentResult.failure` in the machine formats) says what the failed turn had sent — the
+provider's status code, the bytes of tool output it added and how full the window was before
+the request, flagged `estimated` while the provider counts no tokens. The failed turn stays in
+the history with `stop_reason "error"`, and its provider session is retired, so the next turn
+resumes from a summary. `Agent.stream(prompt)` is the one-shot form: it
 runs a throwaway session and its final `session.completed` event carries the same `text` that
 `Agent.run()` would return. `run(on_delta=...)` still works and is unchanged.
 
