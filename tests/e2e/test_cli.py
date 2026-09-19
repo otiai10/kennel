@@ -88,6 +88,34 @@ def test_trace_emits_json_events(meeting_ws):
     assert not any("content" in e for e in events)
 
 
+FAILING_TURN = {
+    "turns": [
+        [
+            {"tool": "read", "arguments": {"path": "transcripts/2026-09-16.txt"}},
+            {"error": "Foundation Models error: Generation error (status: 255): None", "status": 255},
+        ],
+        "recovered",
+    ]
+}
+
+
+def test_one_shot_error_line_reports_what_the_turn_sent(meeting_ws):
+    p = run_cli(["-p", "summarize"], meeting_ws, script=FAILING_TURN)
+    assert p.returncode == 1, p.stderr
+    assert "● Read transcripts/2026-09-16.txt" in p.stdout
+    assert "Generation error (status: 255)" in p.stderr
+    assert "bytes of tool output" in p.stderr
+    assert "tokens (estimated) before the request." in p.stderr
+
+
+def test_interactive_reports_the_failure_then_keeps_going(meeting_ws):
+    p = run_cli([], meeting_ws, script=FAILING_TURN, stdin="summarize\n/usage\nagain\n/exit\n")
+    assert p.returncode == 0, p.stderr
+    assert "bytes of tool output" in p.stderr
+    assert "recovered" in p.stdout  # the session survived the failed turn
+    assert "turns: 1\ncompactions: 1" in p.stdout  # the failed turn is in the history
+
+
 def test_interactive_session(meeting_ws):
     script = {"turns": [[{"tool": "glob", "arguments": {"pattern": "*.md"}}, {"text": "answer one"}], "answer two"]}
     stdin = "/help\n/status\nfirst\n/clear\nsecond\n/unknown\n/exit\n"

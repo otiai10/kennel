@@ -172,6 +172,51 @@ async def test_context_error_without_history_or_twice_raises(meeting_ws):
         await session.run("q2")
 
 
+async def test_failed_turn_is_recorded_in_history_with_its_tool_calls(meeting_ws):
+    """AC-1: a turn that raised still shows up, with what it managed to do."""
+    turns = [[ToolCall("glob", {"pattern": "transcripts/*.txt"}), Raise(ProviderError("boom", status=255))]]
+    agent, _, _ = make_agent(meeting_ws, turns)
+    session = agent.new_session()
+    with pytest.raises(ProviderError, match="boom"):
+        await session.run("read everything")
+    turn = session.history[-1]
+    assert turn.stop_reason == "error" and turn.prompt == "read everything" and turn.response == ""
+    assert [c.name for c in turn.tool_calls] == ["glob"] and turn.tool_calls[0].status == "ok"
+    assert session.context_usage().turns == 1  # /usage and /status see it too
+
+
+async def test_session_failed_carries_the_turn_facts(meeting_ws):
+    """AC-2: the failure event reports sizes and the context before the request, not guesses."""
+    turns = [[ToolCall("read", {"path": "transcripts/2026-09-16.txt"}), Raise(ProviderError("boom", status=255))]]
+    agent, _, events = make_agent(meeting_ws, turns)
+    session = agent.new_session()
+    with pytest.raises(ProviderError):
+        await session.run("summarize")
+    failed = [e for e in events if e.type == EventType.SESSION_FAILED]
+    assert len(failed) == 1
+    data = failed[0].data
+    assert data["error"] == "boom" and data["error_type"] == "ProviderError" and data["status"] == 255
+    assert data["tool_output_bytes"] == session.history[-1].tool_calls[0].output_bytes > 0
+    assert data["context_tokens_before"] > 0 and data["context_window_tokens"] == 4096
+    assert data["estimated"] is True and data["duration_ms"] >= 0
+    assert session.last_failure == data
+
+
+async def test_failure_retires_the_provider_session_and_the_next_turn_resumes(meeting_ws):
+    """AC-3: the provider session is dropped, so the next turn starts from a summary."""
+    agent, provider, events = make_agent(meeting_ws, [[Raise(ProviderError("boom", status=255))], "recovered"])
+    session = agent.new_session()
+    with pytest.raises(ProviderError):
+        await session.run("q1")
+    assert session._provider_session is None and provider.sessions[0].closed
+    assert session.compactions == 1
+    result = await session.run("q2")
+    assert result.text == "recovered" and session.compactions == 1
+    assert len(provider.sessions) == 2
+    assert "User asked: q1" in provider.sessions[1].instructions
+    assert [e.type for e in events].count(EventType.SESSION_FAILED) == 1
+
+
 async def test_provider_exceptions_become_kennel_errors(meeting_ws):
     agent, _, _ = make_agent(meeting_ws, [[Raise(RuntimeError("boom"))]])
     with pytest.raises(ProviderError, match="boom"):
