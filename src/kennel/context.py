@@ -63,26 +63,41 @@ _NARRATION_PHRASES = re.compile(
 )
 
 
-def looks_like_tool_narration(text: str, tool_names: Iterable[str]) -> bool:
-    """True if an answer describes tool steps instead of taking them.
+def looks_like_tool_narration(text: str, tool_names: Iterable[str]) -> str | None:
+    """The rule name if an answer describes tool steps instead of taking them, else ``None``.
 
-    Used only for turns in which no tool was actually called. Matches a fenced
-    code block, a mention of an available tool by name, an "I will run ..."
-    announcement, or a "which file should I check?" question, in English or
-    Japanese. An agent with file tools should look rather than ask.
+    Used only for turns in which no tool was actually called. Returns which rule
+    fired so callers (``Session._should_nudge``) can report it on ``model.nudged``:
+
+    - ``"code_block"`` — a fenced code block (the model showed a command instead
+      of running it)
+    - ``"file_mention"`` — talking about files without having looked at any
+    - ``"tool_name"`` — an explicit mention of an available tool by name
+      (``"the read tool"``, ``"call glob"``), not a bare appearance of a common
+      English word that happens to share a tool's name
+    - ``"phrase"`` — an "I will run ..." announcement or a "which file should I
+      check?" question, in English or Japanese
+
+    An agent with file tools should look rather than ask. The return value is
+    truthy exactly when the previous ``bool`` contract would have been ``True``,
+    so existing ``assert looks_like_tool_narration(...)`` callers keep working.
     """
     if not text.strip():
-        return False
+        return None
     if "```" in text:
-        return True
+        return "code_block"
     # Talking about files without having looked at any is narration or a clarifying
     # question an agent with file tools should answer by looking.
     if "ファイル" in text or re.search(r"\bfiles?\b", text, re.IGNORECASE):
-        return True
+        return "file_mention"
     lowered = text.lower()
-    if any(re.search(rf"\b{re.escape(name)}\b", lowered) for name in tool_names):
-        return True
-    return _NARRATION_PHRASES.search(text) is not None
+    # Require the tool name to appear next to "tool" (e.g. "the read tool", "call
+    # the glob tool"): tool names like read/write/edit/shell are ordinary English
+    # words, so a bare `\bname\b` match fires on unrelated sentences ("Please edit
+    # the summary").
+    if any(re.search(rf"\b(?:{re.escape(name)}\s+tool|tool\s+{re.escape(name)})\b", lowered) for name in tool_names):
+        return "tool_name"
+    return "phrase" if _NARRATION_PHRASES.search(text) else None
 
 
 def truncate_text(text: str, max_bytes: int, marker: str = "\n... [output truncated]") -> tuple[str, bool]:
