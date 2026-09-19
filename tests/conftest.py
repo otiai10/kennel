@@ -10,6 +10,19 @@ from kennel.workspace import Workspace
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+@pytest.fixture(autouse=True)
+def state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep every test's session event log inside its own tmp directory.
+
+    The CLI keeps an event log by default, so without this a test run would write into the
+    developer's real ``~/.local/state/kennel``. ``monkeypatch.setenv`` also reaches the CLI
+    subprocesses, which inherit ``os.environ``.
+    """
+    directory = tmp_path / "state"
+    monkeypatch.setenv("KENNEL_STATE_DIR", str(directory))
+    return directory
+
+
 @pytest.fixture
 def ws_dir(tmp_path: Path) -> Path:
     """A workspace with text, binary, hidden, ignored and symlinked entries plus an outside sibling."""

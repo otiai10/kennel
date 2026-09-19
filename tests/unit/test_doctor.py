@@ -36,6 +36,7 @@ def test_mock_provider_checks_pass(meeting_ws: Path, tmp_path: Path):
         "xcode",
         "user config",
         "project config",
+        "event log",
         "workspace",
         "effective config",
     ]  # the apple-only checks belong to the apple provider now
@@ -103,3 +104,33 @@ def test_unknown_provider_fails_only_the_provider_check(meeting_ws: Path, tmp_pa
     assert by_name["provider"].ok is False
     assert "mock" in by_name["provider"].detail  # the registered names are listed
     assert by_name["python"].ok and by_name["workspace"].ok and by_name["effective config"].ok
+
+
+def test_event_log_check_reports_the_directory_without_creating_it(meeting_ws: Path, tmp_path: Path, state_dir: Path):
+    """doctor is a diagnostic: it says where the log goes and leaves no state behind."""
+    checks = run_checks(str(meeting_ws), "mock", user_config=tmp_path / "nope-settings.json")
+    log = next(c for c in checks if c.name == "event log")
+    assert log.ok and log.detail == f"session event log {state_dir / 'sessions'}"
+    assert not state_dir.exists()
+
+
+def test_event_log_check_says_when_the_config_turned_it_off(meeting_ws: Path, tmp_path: Path):
+    (meeting_ws / "kennel.json").write_text(json.dumps({"logging": {"events": False}}))
+    checks = run_checks(str(meeting_ws), "mock", user_config=tmp_path / "nope-settings.json")
+    log = next(c for c in checks if c.name == "event log")
+    assert log.ok and "off" in log.detail
+
+
+def test_event_log_check_fails_when_the_state_dir_is_not_writable(
+    meeting_ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    blocked = tmp_path / "blocked"
+    blocked.mkdir(mode=0o500)
+    monkeypatch.setenv("KENNEL_STATE_DIR", str(blocked / "kennel"))
+    try:
+        checks = run_checks(str(meeting_ws), "mock", user_config=tmp_path / "nope-settings.json")
+        log = next(c for c in checks if c.name == "event log")
+        assert not log.ok and "not writable" in log.detail
+        assert log.hint is not None and "KENNEL_STATE_DIR" in log.hint
+    finally:
+        blocked.chmod(0o700)
