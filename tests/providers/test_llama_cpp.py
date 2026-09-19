@@ -58,10 +58,6 @@ class Script:
     error: BaseException | None = None  # raised instead of streaming
     delay: float = 0.0  # seconds before each piece, so a turn can be interrupted
 
-    @property
-    def raw(self) -> str:
-        return "".join(self.pieces)
-
 
 @dataclass
 class Fake:

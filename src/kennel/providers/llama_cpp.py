@@ -96,11 +96,12 @@ TOOL_OPEN, TOOL_CLOSE = "<tool_call>", "</tool_call>"
 
 @dataclass(frozen=True)
 class _Lib:
-    """The three llama-cpp-python names Kennel uses, imported in one place."""
+    """What Kennel uses out of llama-cpp-python, imported in one place."""
 
     Llama: Any
     LlamaGrammar: Any
     Jinja2ChatFormatter: Any
+    version: str
 
 
 def _import_lib() -> _Lib:
@@ -110,7 +111,12 @@ def _import_lib() -> _Lib:
         from llama_cpp.llama_chat_format import Jinja2ChatFormatter
     except ImportError as exc:
         raise ModelUnavailableError(f"llama-cpp-python is not installed: {exc}. {INSTALL_HINT}") from exc
-    return _Lib(llama_cpp.Llama, llama_cpp.LlamaGrammar, Jinja2ChatFormatter)
+    return _Lib(
+        llama_cpp.Llama,
+        llama_cpp.LlamaGrammar,
+        Jinja2ChatFormatter,
+        getattr(llama_cpp, "__version__", "unknown"),
+    )
 
 
 def _map_error(exc: BaseException) -> BaseException:
@@ -133,6 +139,9 @@ def _map_error(exc: BaseException) -> BaseException:
 _TAGS: dict[str, str] = {THINK_OPEN: "think", TOOL_OPEN: "tool", THINK_CLOSE: "text"}
 
 
+_LONGEST_TAG = max(len(tag) for tag in _TAGS)
+
+
 def _held_back(buffer: str) -> int:
     """How much of ``buffer``'s tail could still turn into a tag.
 
@@ -140,11 +149,23 @@ def _held_back(buffer: str) -> int:
     start of ``<tool_call>``: releasing it would leak markup into the answer, so it
     waits for the next chunk.
     """
-    for size in range(min(len(buffer), max(len(tag) for tag in _TAGS) - 1), 0, -1):
+    for size in range(min(len(buffer), _LONGEST_TAG - 1), 0, -1):
         tail = buffer[-size:]
         if any(tag.startswith(tail) for tag in _TAGS):
             return size
     return 0
+
+
+def _tool_request(payload: str) -> tuple[str, str] | None:
+    """``(name, arguments as JSON text)`` from a ``<tool_call>`` body, or ``None`` if unreadable."""
+    try:
+        parsed = json.loads(payload)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("name"), str):
+        return None
+    arguments = parsed.get("arguments", {})
+    return parsed["name"], arguments if isinstance(arguments, str) else json.dumps(arguments)
 
 
 class _CompletionParser:
@@ -221,15 +242,9 @@ class _CompletionParser:
         """
         index, self._calls = self._calls, self._calls + 1
         delta = ToolCallDelta(index=index, id=f"call_{index}", arguments=payload.strip())
-        try:
-            parsed = json.loads(payload)
-        except ValueError:
-            return ChatChunk(tool_calls=[delta])
-        if not isinstance(parsed, dict) or not isinstance(parsed.get("name"), str):
-            return ChatChunk(tool_calls=[delta])
-        arguments = parsed.get("arguments", {})
-        delta.name = parsed["name"]
-        delta.arguments = arguments if isinstance(arguments, str) else json.dumps(arguments)
+        request = _tool_request(payload)
+        if request is not None:
+            delta.name, delta.arguments = request
         return ChatChunk(tool_calls=[delta])
 
 
@@ -270,7 +285,6 @@ class LlamaCppTransport:
         self._formatter = formatter
         self._lock = lock
         self._template_kwargs = template_kwargs
-        self._prompt_tokens: list[int] = []
 
     async def stream(
         self,
@@ -304,7 +318,7 @@ class LlamaCppTransport:
                 with self._lock:  # one model, one KV cache: generations are serialised
                     if leaving.is_set():  # cancelled while waiting for the lock
                         return
-                    completion = self._start(messages, tools, schema)
+                    completion, prompt_tokens = self._start(messages, tools, schema)
                     finish_reason: str | None = None
                     raw: list[str] = []
                     parser = _CompletionParser()
@@ -319,7 +333,15 @@ class LlamaCppTransport:
                             put(chunk)
                     for chunk in parser.finish():
                         put(chunk)
-                    put(ChatChunk(finish_reason=finish_reason, usage=self._usage("".join(raw))))
+                    put(
+                        ChatChunk(
+                            finish_reason=finish_reason,
+                            usage=Usage(
+                                input_tokens=len(prompt_tokens),
+                                output_tokens=len(self._tokenize("".join(raw))),
+                            ),
+                        )
+                    )
             except BaseException as exc:  # noqa: BLE001 - forwarded to the caller
                 if not leaving.is_set():
                     put(_map_error(exc))
@@ -348,21 +370,21 @@ class LlamaCppTransport:
         messages: Sequence[ChatMessage],
         tools: Sequence[dict[str, Any]],
         schema: dict[str, Any] | None,
-    ) -> Iterator[dict[str, Any]]:
+    ) -> tuple[Iterator[dict[str, Any]], list[int]]:
         """Render the chat template, tokenize it and open the completion stream."""
         rendered = self._formatter(
             messages=[_render_message(message) for message in messages],
             tools=list(tools) or None,  # None, not []: what a template's `if tools` expects
             **self._template_kwargs,
         )
-        self._prompt_tokens = self._tokenize(rendered.prompt)
+        prompt_tokens = self._tokenize(rendered.prompt)
         grammar = (
             self._lib.LlamaGrammar.from_json_schema(json.dumps(schema), verbose=False)
             if schema is not None
             else None
         )
-        return self._llama.create_completion(
-            self._prompt_tokens,
+        completion = self._llama.create_completion(
+            prompt_tokens,
             stream=True,
             # None means "as much as the window allows": the library's own default is 16.
             max_tokens=None,
@@ -370,12 +392,10 @@ class LlamaCppTransport:
             stopping_criteria=getattr(rendered, "stopping_criteria", None),
             grammar=grammar,
         )
+        return completion, prompt_tokens
 
     def _tokenize(self, text: str) -> list[int]:
         return self._llama.tokenize(text.encode("utf-8"), add_bos=False, special=True)
-
-    def _usage(self, raw: str) -> Usage:
-        return Usage(input_tokens=len(self._prompt_tokens), output_tokens=len(self._tokenize(raw)))
 
 
 # -- the provider ------------------------------------------------------------
@@ -498,17 +518,13 @@ def llama_cpp_doctor_checks(**options: Any) -> list[Check]:
             Check("model", False, "skipped: the provider could not be built"),
         ]
     try:
-        _import_lib()
+        lib = _import_lib()
     except ModelUnavailableError as exc:
         return [
             Check("llama-cpp-python", False, str(exc), hint=INSTALL_HINT),
             Check("model", False, "skipped: llama_cpp is not importable"),
         ]
-    import llama_cpp
-
-    package = Check(
-        "llama-cpp-python", True, f"llama_cpp {getattr(llama_cpp, '__version__', 'unknown')} importable"
-    )
+    package = Check("llama-cpp-python", True, f"llama_cpp {lib.version} importable")
     if not provider.model_path.is_file():
         return [
             package,
