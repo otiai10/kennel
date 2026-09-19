@@ -72,6 +72,15 @@ pip install -e ".[dev]"    # or: uv sync --extra dev
 kennel --help
 ```
 
+There is one optional extra, `llama-cpp`, for the in-process llama.cpp provider
+([below](#llama-cpp-the-same-model-in-this-process-no-server-no-port)). It is not installed
+by default, and PyPI ships an sdist only, so it builds llama.cpp from source: about a minute
+on Apple Silicon, Xcode Command Line Tools required, cmake is fetched automatically.
+
+```bash
+pip install -e ".[dev,llama-cpp]"    # or: uv sync --extra dev --extra llama-cpp
+```
+
 > **About the `apple-fm-sdk<0.2.1` pin.** The SDK has no wheels; installing it builds a Swift
 > bridge with your Xcode. Version 0.2.1 references APIs that only exist in the macOS 27 SDK
 > shipped with Xcode 27, so with Xcode 26.x it fails to compile. The upper bound will be
@@ -456,6 +465,61 @@ kennel ~/meetings --provider llama-server
 - Any OpenAI-compatible server (Ollama, LM Studio, mlx-lm) speaks the same protocol, but
   llama-server is the one Kennel is tested against.
 
+### llama-cpp (the same model in this process, no server, no port)
+
+Same llama.cpp, without a server to run: `llama-cpp` loads a GGUF into Kennel's own
+process through [llama-cpp-python](https://github.com/abetlen/llama-cpp-python). Nothing
+listens on a port, so nothing but Kennel can reach the model — the strongest form of the
+local-first contract, and `mode` is `local` unconditionally. **Kennel still never downloads
+a model**: you point it at a `.gguf` you already have.
+
+```bash
+uv tool install "git+https://github.com/otiai10/kennel#egg=kennel[llama-cpp]"
+# in a checkout: uv sync --extra dev --extra llama-cpp
+kennel ~/meetings --provider llama-cpp
+```
+
+```json
+{
+  "provider": "llama-cpp",
+  "providers": {
+    "llama-cpp": {
+      "model_path": "~/models/Qwen3-4B-Q4_K_M.gguf",
+      "n_ctx": 16384,
+      "n_gpu_layers": -1,
+      "chat_template_kwargs": { "enable_thinking": false },
+      "llama_kwargs": {}
+    }
+  }
+}
+```
+
+- The `[llama-cpp]` extra is **not** installed by default. PyPI ships an sdist only, so
+  installing it builds llama.cpp from source: about a minute on Apple Silicon, Xcode
+  Command Line Tools required, cmake is fetched automatically. Kennel is verified against
+  llama-cpp-python 0.3.35.
+- `model_path` is the only required option (`~` is expanded). `n_ctx` is the context window
+  and is what the CLI header and `/usage` report; `n_gpu_layers` defaults to `-1` (every
+  layer on the GPU); `llama_kwargs` reaches the `Llama` constructor for anything else
+  (`n_threads`, `seed`, …).
+- **Tool calls are Qwen3-shaped.** Kennel renders the GGUF's own chat template and parses
+  the `<tool_call>{json}</tool_call>` the model emits, because llama-cpp-python passes
+  `tools` to the template but does not parse what comes back. A GGUF whose template ignores
+  `tools` can still chat, but cannot call tools. Qwen3-4B-GGUF is what this is tested
+  against.
+- **Thinking is off by default**: `chat_template_kwargs` defaults to
+  `{"enable_thinking": false}`, because Qwen3 otherwise spends a few hundred tokens in
+  `<think>` before every tool call. Pass `{}` to send nothing, or
+  `{"enable_thinking": true}` to let it think — either way the scratchpad is stripped and
+  never appears in the answer.
+- Token counts come from the model's own tokenizer, so `AgentResult.usage` is filled and
+  `/usage` says *reported by the provider*.
+- The model is loaded once, on the first turn, and shared by every session; `kennel doctor`
+  and `Agent(...)` only check the import, the file and `n_ctx`, so neither waits for a load.
+  One model is one KV cache, so turns are run one at a time.
+- Ctrl-C stops generation at the next token. While the prompt is still being evaluated
+  (about 11 seconds for a 7k-token prompt on an M-series Mac) nothing interrupts it.
+
 Ctrl-C (`Session.interrupt()`), `Session.stream()`, `run(schema=)` and `compact()` all work
 the same as on Apple; the tool-calling loop for chat-completions providers is
 `kennel/providers/chatloop.py`, shared rather than written per provider.
@@ -499,7 +563,8 @@ approved from the prompt, planned for a later version). All keys are optional.
   "provider": "apple",
   "providers": {
     "apple": { "deterministic": false },
-    "llama-server": { "base_url": "http://127.0.0.1:8080" }
+    "llama-server": { "base_url": "http://127.0.0.1:8080" },
+    "llama-cpp": { "model_path": "~/models/Qwen3-4B-Q4_K_M.gguf", "n_ctx": 16384 }
   },
   "permission_mode": "default",
   "permissions": {
@@ -524,6 +589,8 @@ In the default configuration:
 - inference uses the Apple on-device model only;
 - a `llama-server` on a loopback address is equally local; pointing `base_url` at another
   host is not, and says so with `mode: remote`;
+- `llama-cpp` runs the model inside Kennel's own process, so it opens no port at all and is
+  `local` unconditionally; no provider downloads a model;
 - local file contents are never sent over the network;
 - the `web` tool is disabled;
 - no telemetry is collected and no Kennel backend is involved.
@@ -549,6 +616,7 @@ ruff check src tests examples
 pytest                                   # unit, provider (MockProvider) and CLI tests; no model needed
 KENNEL_APPLE_TESTS=1 pytest -m apple     # Apple integration tests, on a capable Mac only
 KENNEL_LLAMA_SERVER=http://127.0.0.1:8080 pytest -m llama   # against a llama-server you started
+KENNEL_LLAMA_CPP_MODEL=~/models/qwen.gguf pytest -m llama   # against a GGUF in this process
 ```
 
 Repository layout:
@@ -573,8 +641,8 @@ spikes/                               Phase 0 SDK experiments (not production co
 v0.0.3 plus the unreleased main branch: interactive and one-shot CLI with `kennel doctor`,
 machine-readable output (`--output-format`, `--json-schema`), permission modes and rule
 syntax, hooks, `Session.stream()` / `interrupt()` / `context_usage()`, MockProvider-based test
-suite, structured meeting summary example, and a `llama-server` provider for a larger context
-window. Not yet: web search provider, persistent sessions, in-process llama.cpp, MCP,
-subagents, sandboxed shell. Design principles live in
+suite, structured meeting summary example, and two llama.cpp providers for a larger context
+window (`llama-server` over HTTP, `llama-cpp` in this process). Not yet: web search provider,
+persistent sessions, MCP, subagents, sandboxed shell. Design principles live in
 [docs/constitution.md](docs/constitution.md); the comparison with Claude Code that drove the
 current roadmap is in `docs/history/`.

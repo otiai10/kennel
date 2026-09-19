@@ -4,7 +4,7 @@ The fake replays the wire shapes measured on llama-server 0.4.1 (build b10964,
 Qwen3-4B-GGUF Q4_K_M, ``-c 32768 --jinja``), including the ``content: null`` first
 chunk, ``reasoning_content`` deltas, the trailing ``choices: []`` usage chunk and
 the ``exceed_context_size_error`` body. Real-model coverage lives in
-``tests/integration/test_llama_server.py`` behind the ``llama`` marker.
+``tests/integration/test_llama.py`` behind the ``llama`` marker.
 """
 
 from __future__ import annotations

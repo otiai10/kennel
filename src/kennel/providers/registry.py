@@ -65,6 +65,18 @@ def _llama_server_doctor_checks(**options: Any) -> Sequence[Check]:
     return llama_server_doctor_checks(**options)
 
 
+def _llama_cpp_factory(**options: Any) -> ModelProvider:
+    from .llama_cpp import llama_cpp_provider
+
+    return llama_cpp_provider(**options)
+
+
+def _llama_cpp_doctor_checks(**options: Any) -> Sequence[Check]:
+    from .llama_cpp import llama_cpp_doctor_checks
+
+    return llama_cpp_doctor_checks(**options)
+
+
 def _mock_factory(script: str | dict[str, Any] | None = None) -> ModelProvider:
     from .mock import MockProvider
 
@@ -74,6 +86,7 @@ def _mock_factory(script: str | dict[str, Any] | None = None) -> ModelProvider:
 _SPECS: dict[str, ProviderSpec] = {
     "apple": ProviderSpec("apple", _apple_factory, _apple_doctor_checks),
     "llama-server": ProviderSpec("llama-server", _llama_server_factory, _llama_server_doctor_checks),
+    "llama-cpp": ProviderSpec("llama-cpp", _llama_cpp_factory, _llama_cpp_doctor_checks),
     "mock": ProviderSpec("mock", _mock_factory),
 }
 

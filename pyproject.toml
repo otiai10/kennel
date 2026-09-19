@@ -31,6 +31,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
+# The in-process llama.cpp provider (--provider llama-cpp). PyPI ships an sdist only, so this
+# builds llama.cpp from source: ~1 minute on Apple Silicon, Xcode Command Line Tools required
+# (cmake is fetched automatically). 0.3.35 is the version the provider is verified against.
+llama-cpp = ["llama-cpp-python>=0.3.35"]
 
 [project.scripts]
 kennel = "kennel.cli.main:main"
@@ -46,7 +50,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
   "apple: requires Apple Foundation Models on this Mac (set KENNEL_APPLE_TESTS=1 to run)",
-  "llama: requires a running llama-server (set KENNEL_LLAMA_SERVER=<base_url> to run)",
+  "llama: requires a llama.cpp model (KENNEL_LLAMA_SERVER=<base_url> for llama-server, KENNEL_LLAMA_CPP_MODEL=<gguf path> for in-process llama-cpp)",
 ]
 
 [tool.ruff]

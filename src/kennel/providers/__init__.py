@@ -1,5 +1,6 @@
-"""Model providers. :class:`AppleProvider` and ``LlamaServerProvider`` talk to real models;
-:class:`MockProvider` is for tests.
+"""Model providers. :class:`AppleProvider`, ``LlamaServerProvider`` (a llama.cpp server over HTTP)
+and ``LlamaCppProvider`` (a GGUF in this process) talk to real models; :class:`MockProvider` is
+for tests.
 
 Providers are chosen by name through :mod:`kennel.providers.registry`, which is also where
 a new one is registered.
