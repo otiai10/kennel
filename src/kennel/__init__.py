@@ -18,7 +18,15 @@ from .errors import (
     WorkspaceError,
     WorkspaceEscapeError,
 )
-from .events import Event, EventBus, EventType
+from .events import (
+    Event,
+    EventBus,
+    EventType,
+    JsonlEventLog,
+    event_json,
+    session_log_path,
+    state_dir,
+)
 from .hooks import HookContext, HookMatcher, Hooks, ToolCallRequest
 from .permissions import (
     Allow,
@@ -59,6 +67,7 @@ __all__ = [
     "EventBus",
     "EventType",
     "HookContext",
+    "JsonlEventLog",
     "HookMatcher",
     "Hooks",
     "KennelConfig",
@@ -96,6 +105,9 @@ __all__ = [
     "WorkspaceError",
     "WorkspaceEscapeError",
     "create_provider",
+    "event_json",
     "load_config",
     "register_provider",
+    "session_log_path",
+    "state_dir",
 ]

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import select
 import sys
 import threading
 from typing import IO
 
-from ..events import Event, EventBus, EventType
+from ..events import Event, EventBus, EventType, event_json
 from ..permissions import Approval, PermissionRequest
 
 
@@ -63,7 +62,8 @@ class Renderer:
 
     def on_event(self, event: Event) -> None:
         if self.trace:
-            self.err.write(json.dumps({"t": round(event.timestamp, 3), "type": event.type, **event.data}, ensure_ascii=False, default=str) + "\n")
+            # Same flat form the session event log writes to disk, so the two never drift.
+            self.err.write(event_json(event) + "\n")
             self.err.flush()
         if self.quiet:
             return
