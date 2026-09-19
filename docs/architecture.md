@@ -61,7 +61,7 @@ For every tool call `ToolRunner.invoke` does, in this order:
 4. the permission decision on the arguments the tool will actually run with: `PermissionManager.decision_for(name, kind, arguments, tool.match_rule)`, then `decide()` prompts if it says `ask`
 5. `tool.execute`
 6. `after_tool` hooks, which may replace the result; the replacement is bounded like any other
-7. output bounding and the `tool.completed` / `tool.failed` event
+7. output bounding and the `tool.completed` / `tool.failed` event. `tool.completed` carries the result's size in bytes and in estimated tokens, plus `window_exceeded` for the case where that one result is already bigger than the provider's declared window — the runner is where the bytes are counted, so it is where the comparison belongs, and the CLI only draws it
 
 Step 4 is the only place the permission precedence lives (`src/kennel/permissions.py`, `decision_for`): `deny` always wins, then a matching specifier rule beats the bare tool rule, then `ask` beats `allow`. A permission mode supplies the defaults the rules layer on; what a specifier means is decided by the tool (`Tool.match_rule`, glob syntax in `src/kennel/rules.py`). Pinned by `tests/unit/test_permission_rules.py` and `tests/unit/test_hooks.py`.
 

@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TEXT|@FILE",
         help="with -p: answer under a JSON schema (guided generation) instead of prose",
     )
-    p.add_argument("--verbose", action="store_true", help="show tool result sizes and diagnostics")
+    p.add_argument("--verbose", action="store_true", help="add tool timings and diagnostic logging (sizes are shown anyway)")
     p.add_argument("--trace", action="store_true", help="write every agent event as JSON to stderr")
     p.add_argument(
         "--no-log",
@@ -383,8 +383,9 @@ def run_once(
             if renderer.verbose:
                 traceback.print_exc()
         renderer.finish_answer()
-        if renderer.verbose:
-            renderer.note(f"(context: {session.context_usage().summary()})")
+        # Shown by default: an on-device window is small enough that "how much is left" is a
+        # decision the user makes every turn. note() stays quiet in the machine formats.
+        renderer.note(f"(context: {session.context_usage().summary()})")
         failure = session.last_failure
         if failed is not None:
             renderer.error(failure_line(str(failed), failure))
@@ -573,8 +574,7 @@ def run_interactive(agent: Agent, renderer: Renderer, prompter: ConsolePrompter 
                 renderer.error(failure_line(str(exc), session.last_failure))
                 continue
             renderer.finish_answer()
-            if renderer.verbose:
-                renderer.note(f"(context: {session.context_usage().summary()})")
+            renderer.note(f"(context: {session.context_usage().summary()})")
             if result is not None and result.stop_reason == "tool_limit":
                 renderer.note("(tool call limit reached; answer may be incomplete)")
             elif result is not None and result.stop_reason == "timeout":

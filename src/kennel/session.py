@@ -368,6 +368,10 @@ class Session:
                 tools=sorted(self.agent.tools),
             )
         self.runner.begin_turn()
+        # Read per turn rather than captured once: a provider may only learn its window in
+        # check_availability() (llama-server asks the server), and context_usage() reads it
+        # the same way, so the two can never disagree.
+        self.runner.context_window_tokens = self.agent.provider.info.context_window_tokens
         self.last_failure = None
         self._emit(EventType.MODEL_STARTED, prompt_chars=len(prompt))
         started = time.perf_counter()
