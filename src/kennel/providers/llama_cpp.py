@@ -236,6 +236,20 @@ class _CompletionParser:
 # -- the transport -----------------------------------------------------------
 
 
+def _render_message(message: ChatMessage) -> dict[str, Any]:
+    """The wire form of one message, with ``content`` always present.
+
+    An HTTP API is handed ``content: null`` or nothing at all and does not mind, but a
+    chat template is Jinja: Qwen3's reads ``message.content`` directly, so a message
+    that left the key out (an assistant turn that is nothing but tool calls) raises
+    ``'dict object' has no attribute 'content'`` mid-render. Verified against
+    Qwen3-4B-GGUF.
+    """
+    payload = message.to_dict()
+    payload.setdefault("content", "")
+    return payload
+
+
 class LlamaCppTransport:
     """One :class:`~kennel.providers.chatloop.ChatTransport` request, in this process.
 
@@ -337,7 +351,7 @@ class LlamaCppTransport:
     ) -> Iterator[dict[str, Any]]:
         """Render the chat template, tokenize it and open the completion stream."""
         rendered = self._formatter(
-            messages=[message.to_dict() for message in messages],
+            messages=[_render_message(message) for message in messages],
             tools=list(tools) or None,  # None, not []: what a template's `if tools` expects
             **self._template_kwargs,
         )

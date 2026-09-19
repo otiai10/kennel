@@ -136,7 +136,10 @@ def fake(monkeypatch: pytest.MonkeyPatch) -> Fake:
             state.formatter_args = kwargs
 
         def __call__(self, *, messages: list[dict[str, Any]], tools: Any = None, **kwargs: Any) -> Rendered:
-            prompt = "PROMPT " + " ".join(str(message.get("content") or "") for message in messages)
+            # A real chat template is Jinja and reads message.content directly, so a
+            # missing key is a render error, not a None.
+            assert all("content" in message for message in messages), messages
+            prompt = "PROMPT " + " ".join(str(message["content"]) for message in messages)
             state.renders.append({"messages": messages, "tools": tools, "kwargs": kwargs, "prompt": prompt})
             return Rendered(prompt)
 
@@ -233,6 +236,21 @@ async def test_the_tool_call_arguments_reach_the_tool(fake: Fake, tmp_path: Path
     }
     assert request[-2]["tool_calls"][0]["id"] == "call_0"
     assert request[-1]["role"] == "tool" and request[-1]["tool_call_id"] == "call_0"
+
+
+async def test_a_wordless_tool_call_still_renders_a_content_key(
+    fake: Fake, tmp_path: Path, meeting_ws: Path
+):
+    """Qwen3's template reads message.content directly: a missing key breaks the render."""
+    fake.scripts = [
+        Script(['<tool_call>{"name": "read", "arguments": {"path": "notes/todo.md"}}</tool_call>']),
+        Script(["Done."]),
+    ]
+    agent = Agent(meeting_ws, provider=provider_for(tmp_path), tools=["read"])
+    await agent.run("read it")
+
+    assert fake.renders[1]["messages"][-2]["content"] == ""  # the assistant said nothing
+    assert all("content" in message for message in fake.renders[1]["messages"])
 
 
 async def test_usage_is_counted_by_the_tokenizer(fake: Fake, tmp_path: Path, meeting_ws: Path):
