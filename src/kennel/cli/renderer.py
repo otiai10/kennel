@@ -82,7 +82,7 @@ class Renderer:
         elif t == EventType.MODEL_NUDGED:
             self._line(s.dim("  ↻ carrying out the described steps instead of narrating them"))
         elif t == EventType.CONTEXT_COMPACTED:
-            self._line(s.dim("  ↻ context compacted, retrying"))
+            self._line(s.dim("  ↻ context compacted"))
 
     def _line(self, text: str) -> None:
         with self._lock:
