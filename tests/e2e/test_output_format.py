@@ -22,6 +22,31 @@ RESULT_KEYS = {
     "usage",
     "structured_output",
     "compactions",
+    "failure",
+}
+
+#: What `failure` carries when a turn failed (docs/output-format.md, `session.failed`).
+FAILURE_KEYS = {
+    "error",
+    "error_type",
+    "status",
+    "provider_error",
+    "tool_output_bytes",
+    "tool_calls",
+    "context_tokens_before",
+    "context_window_tokens",
+    "estimated",
+    "duration_ms",
+}
+
+#: A turn that reads a transcript and then fails the way Apple's status 255 fails.
+FAILING_FLOW = {
+    "turns": [
+        [
+            {"tool": "read", "arguments": {"path": "transcripts/2026-09-16.txt"}},
+            {"error": "Foundation Models error: Generation error (status: 255): None", "status": 255},
+        ]
+    ]
 }
 
 
@@ -37,6 +62,7 @@ def test_json_prints_a_single_result_object(meeting_ws):
     assert len(result["session_id"]) == 12
     assert result["text"].endswith("Unresolved: release notes owner.")
     assert result["compactions"] == 0 and result["usage"] is None and result["structured_output"] is None
+    assert result["failure"] is None  # nothing failed
     names = [call["name"] for call in result["tool_calls"]]
     assert names == ["glob", "read", "read", "write"]
     assert [c["status"] for c in result["tool_calls"]] == ["ok", "ok", "error", "denied"]
@@ -60,6 +86,35 @@ def test_stream_json_emits_one_json_per_line(meeting_ws):
     assert not any("content" in json.dumps(line["data"]) for line in lines if line["type"].startswith("tool."))
 
 
+#: What `tool.completed` carries (docs/output-format.md, "Event objects").
+TOOL_COMPLETED_KEYS = {
+    "tool",
+    "summary",
+    "output_bytes",
+    "estimated_tokens",
+    "context_window_tokens",
+    "window_exceeded",
+    "truncated",
+    "duration_ms",
+    "metadata",
+}
+
+
+def test_stream_json_tool_completed_reports_the_size_in_bytes_and_tokens(meeting_ws):
+    """AC-4: the estimate and the window comparison are on the record, not only in the CLI."""
+    (meeting_ws / "big.txt").write_text("x" * 20_000)
+    script = {"turns": [[{"tool": "read", "arguments": {"path": "big.txt"}}, {"text": "done"}]]}
+    p = run_cli(["-p", "read it", "--output-format", "stream-json"], meeting_ws, script=script)
+    assert p.returncode == 0, p.stderr
+    lines = [json.loads(line) for line in p.stdout.splitlines()]
+    data = next(line["data"] for line in lines if line["type"] == "tool.completed")
+    assert set(data) == TOOL_COMPLETED_KEYS
+    assert data["output_bytes"] > 20_000
+    assert data["estimated_tokens"] == -(-data["output_bytes"] // 4)  # ceil(bytes / 4)
+    assert data["context_window_tokens"] == 4096 and data["window_exceeded"] is True
+    assert "(context" not in p.stdout  # the human lines stay out of a machine format
+
+
 def test_stream_json_can_be_combined_with_trace(meeting_ws):
     p = run_cli(["-p", "x", "--output-format", "stream-json", "--trace"], meeting_ws)
     assert p.returncode == 0, p.stderr
@@ -76,6 +131,31 @@ def test_json_reports_an_unavailable_model_as_an_error_result(meeting_ws):
     assert result["stop_reason"] == "error" and "unavailable" in result["error"]
     assert result["text"] == "" and result["tool_calls"] == []
     assert "Mock model is marked unavailable" in p.stderr
+
+
+def test_json_reports_a_failed_turn_with_the_turn_facts(meeting_ws):
+    """AC-4: the error record carries the same facts as `session.failed`."""
+    p = run_cli(["-p", "x", "--output-format", "json"], meeting_ws, script=FAILING_FLOW)
+    assert p.returncode == 1, p.stdout
+    result = json.loads(p.stdout)
+    assert result["is_error"] is True and result["stop_reason"] == "error"
+    failure = result["failure"]
+    assert set(failure) == FAILURE_KEYS
+    assert failure["status"] == 255 and failure["error_type"] == "ProviderError"
+    assert failure["tool_output_bytes"] > 0 and failure["tool_calls"] == 1
+    assert failure["context_tokens_before"] > 0 and failure["context_window_tokens"] == 4096
+    assert failure["estimated"] is True
+    # stderr says the same in one human line
+    assert "bytes of tool output" in p.stderr and "before the request" in p.stderr
+
+
+def test_stream_json_ends_with_session_failed_then_the_error_result(meeting_ws):
+    p = run_cli(["-p", "x", "--output-format", "stream-json"], meeting_ws, script=FAILING_FLOW)
+    assert p.returncode == 1, p.stdout
+    lines = [json.loads(line) for line in p.stdout.splitlines()]
+    failed = [line for line in lines if line["type"] == "session.failed"]
+    assert len(failed) == 1 and set(failed[0]["data"]) == FAILURE_KEYS
+    assert lines[-1]["type"] == "result" and lines[-1]["failure"] == failed[0]["data"]
 
 
 def test_json_reports_a_configuration_error_as_an_error_result(meeting_ws):

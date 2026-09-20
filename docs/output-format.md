@@ -64,6 +64,7 @@ object.
 | `usage` | object \| null | `{"input_tokens", "output_tokens"}`; `null` while the on-device provider reports no token counts |
 | `structured_output` | object \| null | the guided-generation value when `--json-schema` (SDK: `run(schema=)`) was used, else `null`. When set, `text` is the same document as JSON |
 | `compactions` | integer | how often the conversation was compacted to fit the context window |
+| `failure` | object \| null | the [failure object](#failure-object) when a turn failed, else `null` |
 
 The exit code is unchanged by the output format: `0` ok, `1` runtime error or turn timeout,
 `2` bad configuration or arguments, `3` model unavailable, `130` interrupted. An error that
@@ -86,12 +87,38 @@ The fields of `kennel.ToolCallRecord`:
 | `error` | string \| null | why it failed |
 | `metadata` | object | tool-specific extras |
 
+### Failure object
+
+What Kennel knows about the turn that failed. The same object is the `data` of the
+`session.failed` event and is reachable from the SDK as `Session.last_failure`, so a
+consumer of either gets the same facts. Every number is counted or reported by the
+provider; nothing here is inferred (constitution principle 4).
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `error` | string | the user-facing message |
+| `error_type` | string | the Kennel error class (`ProviderError`, `ContextLimitError`, ...) |
+| `status` | integer \| null | the status code the provider reported, when it reports one (Apple's `255` is `GenerationErrorCode.UNKNOWN_ERROR`) |
+| `provider_error` | string \| null | the provider's own wording, when Kennel replaced it with a friendlier message |
+| `tool_output_bytes` | integer | how many bytes of tool output this turn handed the model |
+| `tool_calls` | integer | how many tool calls this turn made |
+| `context_tokens_before` | integer | how full the window was **before** the request |
+| `context_window_tokens` | integer \| null | the window the provider declares, `null` when it declares none |
+| `estimated` | boolean | whether `context_tokens_before` is an estimate (true while the provider counts no tokens) |
+| `duration_ms` | number | how long the turn ran before it failed |
+
+A failed turn is also kept in the session's history with `stop_reason: "error"` and the tool
+calls it did make, so `/usage`, `/status` and `Session.context_usage()` account for it. The
+provider session is retired after a failure (the conversation is compacted), because the
+provider gives no way to tell whether the failed prompt stayed in its transcript;
+`compactions` therefore grows by one and the next turn resumes from a summary.
+
 ## Event objects
 
 `stream-json` only. One line per event, in the order the agent emitted them:
 
 ```json
-{"type": "tool.completed", "session_id": "2f1c9a4b7e03", "timestamp": 1789531200.42, "data": {"tool": "read", "summary": "Read README.md", "output_bytes": 1024, "truncated": false, "duration_ms": 3.1, "metadata": {}}}
+{"type": "tool.completed", "session_id": "2f1c9a4b7e03", "timestamp": 1789531200.42, "data": {"tool": "read", "summary": "Read README.md", "output_bytes": 1024, "estimated_tokens": 256, "context_window_tokens": 4096, "window_exceeded": false, "truncated": false, "duration_ms": 3.1, "metadata": {}}}
 ```
 
 | Key | Type | Meaning |
@@ -107,6 +134,24 @@ Event types: `session.started`, `session.completed`, `session.failed`, `session.
 `tool.failed`, `tool.blocked`, `context.compacted`. `session.cancelled` follows an
 interrupted turn and `tool.blocked` a call a `before_tool` hook denied; both are the
 `EventType` members of `kennel.events`, which is the authoritative list.
+
+`session.failed` carries the [failure object](#failure-object) as its `data`, and is
+preceded by the `context.compacted` of retiring the provider session.
+
+`tool.completed` says how big the result handed to the model was, in bytes and in estimated
+tokens:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `output_bytes` | integer | size of the result handed to the model |
+| `estimated_tokens` | integer | what those bytes are estimated to cost. An estimate, as the name says: the on-device provider counts no tokens (constitution principle 4) |
+| `context_window_tokens` | integer \| null | the window the provider declares, `null` when it declares none |
+| `window_exceeded` | boolean | `estimated_tokens > context_window_tokens` — **this one result** is already too big for the window, whatever else the conversation holds. It is not a statement about how full the context currently is; for that, use `Session.context_usage()`. Always `false` when the provider declares no window |
+
+The CLI draws this line for every tool call whether or not `--verbose` is set
+(`↳ 20,008 bytes (~5,002 tokens, exceeds the 4,096-token window)`, in yellow when the window
+is exceeded), and prints `(context: ...)` after each turn. `--verbose` only adds the timing.
+Neither appears in `json` / `stream-json` mode, where stdout is JSON alone.
 
 `model.delta` carries `{"text": "..."}` — the generated fragment. Guided generation arrives
 whole, so a `--json-schema` turn emits exactly one `model.delta` holding the document. Every

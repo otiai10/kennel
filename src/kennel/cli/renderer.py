@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import select
 import sys
 import threading
-from typing import IO
+from typing import IO, Any
 
-from ..events import Event, EventBus, EventType
+from ..events import Event, EventBus, EventType, event_json
 from ..permissions import Approval, PermissionRequest
 
 
@@ -39,7 +38,7 @@ class Style:
 
 
 class Renderer:
-    """Prints one line per tool call and streams the answer, keeping the two apart.
+    """Prints each tool call and what its result cost, then streams the answer, keeping the two apart.
 
     With ``quiet`` nothing is written to stdout (``--output-format json`` owns it);
     ``--trace`` and ``error()`` still write to stderr.
@@ -63,7 +62,8 @@ class Renderer:
 
     def on_event(self, event: Event) -> None:
         if self.trace:
-            self.err.write(json.dumps({"t": round(event.timestamp, 3), "type": event.type, **event.data}, ensure_ascii=False, default=str) + "\n")
+            # Same flat form the session event log writes to disk, so the two never drift.
+            self.err.write(event_json(event) + "\n")
             self.err.flush()
         if self.quiet:
             return
@@ -72,9 +72,8 @@ class Renderer:
         d = event.data
         if t == EventType.TOOL_STARTED:
             self._line(f"{s.cyan('●')} {d.get('summary', '')}")
-        elif t == EventType.TOOL_COMPLETED and self.verbose:
-            extra = ", truncated" if d.get("truncated") else ""
-            self._line(s.dim(f"  ↳ {d.get('output_bytes', 0)} bytes{extra} in {d.get('duration_ms', 0):.0f} ms"))
+        elif t == EventType.TOOL_COMPLETED:
+            self._line(self._tool_result(d))
         elif t == EventType.TOOL_FAILED:
             self._line(s.red(f"  ✗ {d.get('error', 'failed')}"))
         elif t == EventType.PERMISSION_DENIED:
@@ -84,7 +83,33 @@ class Renderer:
             suffix = f" (rule: {rule})" if rule else ""
             self._line(s.dim(f"  ↻ carrying out the described steps instead of narrating them{suffix}"))
         elif t == EventType.CONTEXT_COMPACTED:
-            self._line(s.dim("  ↻ context compacted, retrying"))
+            self._line(s.dim("  ↻ context compacted"))
+
+    def _tool_result(self, data: dict[str, Any]) -> str:
+        """``  ↳ 22,757 bytes (~5,690 tokens, exceeds the 4,096-token window)``.
+
+        Shown whether or not ``--verbose`` is on, because a result that cannot fit the window
+        is the one thing the user can act on before the turn fails; ``--verbose`` only adds the
+        timing. The token figure is an estimate and is named as one (principle 4). A result
+        that does not fit turns the line yellow.
+        """
+        s = self.style
+        notes: list[str] = []
+        tokens = data.get("estimated_tokens")
+        if isinstance(tokens, int):
+            notes.append(f"~{tokens:,} tokens")
+        window = data.get("context_window_tokens")
+        exceeded = bool(data.get("window_exceeded")) and isinstance(window, int)
+        if exceeded:
+            notes.append(f"exceeds the {window:,}-token window")
+        if data.get("truncated"):
+            notes.append("truncated")
+        line = f"  ↳ {data.get('output_bytes', 0):,} bytes"
+        if notes:
+            line += f" ({', '.join(notes)})"
+        if self.verbose:
+            line += f" in {data.get('duration_ms', 0):.0f} ms"
+        return s.yellow(line) if exceeded else s.dim(line)
 
     def _line(self, text: str) -> None:
         with self._lock:

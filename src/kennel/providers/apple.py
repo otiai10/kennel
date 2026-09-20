@@ -15,6 +15,7 @@ Design notes (verified against apple_fm_sdk 0.2.0):
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any, Optional, TypeVar
@@ -53,20 +54,33 @@ def _unavailable_message(fm, reason) -> str:
     return f"The on-device model is unavailable ({reason})."
 
 
+#: apple_fm_sdk builds its generation errors as ``"...(status: N): <debug_description>"``
+#: and keeps the code nowhere else, so the number is read back out of the message. It is the
+#: SDK's own report, not an estimate; when the pattern is absent the status stays ``None``.
+_STATUS_IN_MESSAGE = re.compile(r"status:\s*(\d+)")
+
+
+def _status_of(exc: BaseException) -> int | None:
+    match = _STATUS_IN_MESSAGE.search(str(exc))
+    return int(match.group(1)) if match else None
+
+
 def _map_error(fm, exc: BaseException) -> BaseException:
+    """Translate an SDK error into a Kennel error, keeping the SDK's own status and wording."""
+    if not isinstance(exc, fm.FoundationModelsError):
+        return exc
+    facts: dict[str, Any] = {"status": _status_of(exc), "provider_error": str(exc)}
     if isinstance(exc, fm.ExceededContextWindowSizeError):
-        return ContextLimitError("The request exceeded the on-device model's context window.")
+        return ContextLimitError("The request exceeded the on-device model's context window.", **facts)
     if isinstance(exc, fm.GuardrailViolationError):
-        return ProviderError("The on-device model's safety guardrails blocked this request.")
+        return ProviderError("The on-device model's safety guardrails blocked this request.", **facts)
     if isinstance(exc, fm.RefusalError):
-        return ProviderError("The on-device model declined to answer this request.")
+        return ProviderError("The on-device model declined to answer this request.", **facts)
     if isinstance(exc, fm.ConcurrentRequestsError):
-        return ProviderError("The model is still busy with a previous request. Try again shortly.")
+        return ProviderError("The model is still busy with a previous request. Try again shortly.", **facts)
     if isinstance(exc, fm.RateLimitedError):
-        return ProviderError("The model rate-limited this request. Try again shortly.")
-    if isinstance(exc, fm.FoundationModelsError):
-        return ProviderError(f"Foundation Models error: {exc}")
-    return exc
+        return ProviderError("The model rate-limited this request. Try again shortly.", **facts)
+    return ProviderError(f"Foundation Models error: {exc}", **facts)
 
 
 def _apple_schema(schema: dict[str, Any], name: str = "Response") -> dict[str, Any]:

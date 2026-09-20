@@ -50,9 +50,9 @@ def test_one_shot_transcript_flow(meeting_ws):
     assert "✗ Path escapes the workspace" in out
     assert "⊘ denied: Write minutes/2026-09-16.md" in out  # stdin is not a tty: ask => deny
     assert "Unresolved: release notes owner." in out
-    assert out.rstrip().splitlines()[-1].startswith("(context: ")  # --verbose reports window usage
+    assert out.rstrip().splitlines()[-1].startswith("(context: ")  # window usage, now shown anyway
     assert not (meeting_ws / "minutes").exists()
-    assert "↳" in out  # verbose sizes
+    assert "in 0 ms" in out or " ms" in out  # --verbose adds the timing to the size line
 
 
 def test_read_only_removes_mutation_tools(meeting_ws):
@@ -86,6 +86,112 @@ def test_trace_emits_json_events(meeting_ws):
     assert types[:3] == ["session.started", "model.started", "tool.requested"]
     assert "permission.denied" in types and types[-1] == "session.completed"
     assert not any("content" in e for e in events)
+
+
+BIG_READ = {
+    "turns": [
+        [
+            {"tool": "read", "arguments": {"path": "big.txt"}},
+            {"text": "done"},
+        ]
+    ]
+}
+
+
+def test_tool_sizes_and_the_context_line_are_shown_by_default(meeting_ws):
+    """AC-3 (and AC-2 through the real CLI): no --verbose needed."""
+    (meeting_ws / "big.txt").write_text("x" * 20_000)
+    p = run_cli(["-p", "read it"], meeting_ws, script=BIG_READ)
+    assert p.returncode == 0, p.stderr
+    lines = p.stdout.rstrip().splitlines()
+    assert "● Read big.txt" in lines[0]
+    assert "bytes" in lines[1] and "exceeds the 4,096-token window" in lines[1]
+    assert lines[-1].startswith("(context: ") and "estimated" in lines[-1]
+    assert " ms" not in lines[1]  # the timing is still --verbose only
+
+
+def test_the_context_line_appears_after_every_interactive_turn(meeting_ws):
+    """AC-3: one line per turn in the REPL, without --verbose."""
+    script = {"turns": ["one", "two"]}
+    p = run_cli([], meeting_ws, script=script, stdin="first\nsecond\n/exit\n")
+    assert p.returncode == 0, p.stderr
+    contexts = [line for line in p.stdout.splitlines() if line.startswith("(context: ")]
+    assert len(contexts) == 2, p.stdout
+    used = [int(line.split("(")[-1].split(" tokens")[0]) for line in contexts]
+    assert used[1] > used[0]  # the window fills up as the conversation grows
+
+
+def test_machine_output_stays_json_only(meeting_ws):
+    """AC-3: quiet suppresses both new lines, so stdout is still JSON alone."""
+    (meeting_ws / "big.txt").write_text("x" * 20_000)
+    p = run_cli(["-p", "read it", "--output-format", "json"], meeting_ws, script=BIG_READ)
+    assert p.returncode == 0, p.stderr
+    assert "(context" not in p.stdout and "↳" not in p.stdout
+    json.loads(p.stdout)  # a single JSON document, nothing else
+
+
+def test_the_cli_keeps_a_session_event_log_by_default(meeting_ws, state_dir):
+    """AC-4: KENNEL_STATE_DIR/sessions/<session_id>.jsonl after a one-shot run."""
+    p = run_cli(["-p", "x", "--output-format", "json"], meeting_ws)
+    assert p.returncode == 0, p.stderr
+    session_id = json.loads(p.stdout)["session_id"]
+    log = state_dir / "sessions" / f"{session_id}.jsonl"
+    assert log.is_file(), sorted((state_dir / "sessions").glob("*")) if state_dir.exists() else state_dir
+    lines = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [line["type"] for line in lines][0] == "session.started"
+    assert [line["type"] for line in lines][-1] == "session.completed"
+    assert all(line["session_id"] == session_id for line in lines)
+    assert not any("text" in line or "content" in line for line in lines)
+
+
+def test_no_log_and_the_config_key_both_turn_it_off(meeting_ws, state_dir):
+    """AC-4: --no-log writes nothing; so does logging.events false; --no-log wins over true."""
+    assert run_cli(["-p", "x", "--no-log"], meeting_ws).returncode == 0
+    assert not state_dir.exists()
+    (meeting_ws / "kennel.json").write_text(json.dumps({"logging": {"events": False}}))
+    assert run_cli(["-p", "x"], meeting_ws).returncode == 0
+    assert not state_dir.exists()
+    (meeting_ws / "kennel.json").write_text(json.dumps({"logging": {"events": True}}))
+    assert run_cli(["-p", "x", "--no-log"], meeting_ws).returncode == 0
+    assert not state_dir.exists()
+    assert run_cli(["-p", "x"], meeting_ws).returncode == 0
+    assert list((state_dir / "sessions").glob("*.jsonl"))  # the config key alone still logs
+
+
+def test_status_shows_where_the_log_is(meeting_ws, state_dir):
+    """AC-5: /status carries the log path."""
+    p = run_cli([], meeting_ws, script={"turns": []}, stdin="/status\n/exit\n")
+    assert p.returncode == 0, p.stderr
+    assert f"log: {state_dir / 'sessions'}" in p.stdout
+    assert p.stdout.count("log: ") == 1 and ".jsonl" in p.stdout
+
+
+FAILING_TURN = {
+    "turns": [
+        [
+            {"tool": "read", "arguments": {"path": "transcripts/2026-09-16.txt"}},
+            {"error": "Foundation Models error: Generation error (status: 255): None", "status": 255},
+        ],
+        "recovered",
+    ]
+}
+
+
+def test_one_shot_error_line_reports_what_the_turn_sent(meeting_ws):
+    p = run_cli(["-p", "summarize"], meeting_ws, script=FAILING_TURN)
+    assert p.returncode == 1, p.stderr
+    assert "● Read transcripts/2026-09-16.txt" in p.stdout
+    assert "Generation error (status: 255)" in p.stderr
+    assert "bytes of tool output" in p.stderr
+    assert "tokens (estimated) before the request." in p.stderr
+
+
+def test_interactive_reports_the_failure_then_keeps_going(meeting_ws):
+    p = run_cli([], meeting_ws, script=FAILING_TURN, stdin="summarize\n/usage\nagain\n/exit\n")
+    assert p.returncode == 0, p.stderr
+    assert "bytes of tool output" in p.stderr
+    assert "recovered" in p.stdout  # the session survived the failed turn
+    assert "turns: 1\ncompactions: 1" in p.stdout  # the failed turn is in the history
 
 
 def test_interactive_session(meeting_ws):

@@ -124,16 +124,29 @@ kennel -p "Read the README and explain this project"   # one-shot
 | `--provider NAME` | model provider to use (default: the `provider` config key, otherwise `apple`) |
 | `--output-format FORMAT` | with `-p`: `text` (default), `json`, `stream-json` |
 | `--json-schema TEXT\|@FILE` | with `-p`: answer under a JSON schema (guided generation) |
-| `--verbose` | show tool output sizes and timings |
+| `--verbose` | add tool timings and diagnostic logging (result sizes are shown anyway) |
 | `--trace` | write every agent event as JSON lines to stderr |
+| `--no-log` | do not keep this session's event log (= `"logging": {"events": false}`) |
 
 Interactive commands: `/help`, `/status`, `/usage`, `/clear`, `/compact`, `/permissions [<tool>
-allow|ask|deny]`, `/exit`. `Ctrl-C` cancels the current answer via `Session.interrupt()` and
+allow|ask|deny]`, `/exit`. `/status` includes the path of this session's event
+log. `Ctrl-C` cancels the current answer via `Session.interrupt()` and
 returns to the prompt (twice at the prompt exits); `Ctrl-D` exits.
 
 The on-device model's context window is about 4k tokens, which is the tightest constraint in
-practice, so `/usage` shows how full it is. With `--verbose` the same line is printed after
-every answer:
+practice, so every tool result is reported with what it costs and every answer ends with how
+full the window is. A single file that cannot fit says so in yellow, before the turn fails:
+
+```text
+> read big.txt and summarize it
+● Read big.txt
+  ↳ 20,008 bytes (~5,002 tokens, exceeds the 4,096-token window)
+done
+(context: 100% of 4096 tokens (5279 tokens, estimated))
+```
+
+The token figures are estimates and say so; the on-device model exposes no token counter, and
+Kennel does not dress an estimate up as a measurement. `/usage` is the longer form:
 
 ```text
 > /usage
@@ -143,6 +156,9 @@ context: 12%
 turns: 1
 compactions: 0
 ```
+
+Both lines are human output, so `--output-format json|stream-json` suppresses them (there the
+same numbers are on the `tool.completed` records). `--verbose` only adds the timing.
 
 For scripts and other processes, `-p` can print machine-readable JSON instead of the human
 rendering:
@@ -205,7 +221,7 @@ asyncio.run(main())
 ```
 
 `Agent.run()` returns an `AgentResult` (`text`, `stop_reason`, `tool_calls`, `usage`,
-`session_id`, `duration_ms`, `is_error`, `structured_output`, `compactions`). `usage` is a
+`session_id`, `duration_ms`, `is_error`, `structured_output`, `compactions`, `failure`). `usage` is a
 `Usage` (`input_tokens`, `output_tokens`) and is only filled when the provider counts tokens
 itself; on Apple's on-device model it stays `None`, because the SDK exposes no token counter.
 Kennel does not guess it per turn — use `context_usage()` below for a picture of the window.
@@ -235,7 +251,12 @@ async with agent.new_session() as session:
 
 The iterator's last event is `session.completed`, whose `data` carries `text`, `stop_reason`,
 `tool_calls` and `turns`. A provider failure is raised out of the `async for` after the
-`session.failed` event has been delivered. `Agent.stream(prompt)` is the one-shot form: it
+`session.failed` event has been delivered; that event's `data` (also `Session.last_failure`,
+and `AgentResult.failure` in the machine formats) says what the failed turn had sent — the
+provider's status code, the bytes of tool output it added and how full the window was before
+the request, flagged `estimated` while the provider counts no tokens. The failed turn stays in
+the history with `stop_reason "error"`, and its provider session is retired, so the next turn
+resumes from a summary. `Agent.stream(prompt)` is the one-shot form: it
 runs a throwaway session and its final `session.completed` event carries the same `text` that
 `Agent.run()` would return. `run(on_delta=...)` still works and is unchanged.
 
@@ -390,6 +411,28 @@ Events (`session.started`, `session.completed`, `session.failed`, `session.cance
 summaries and sizes, never file contents. Subscribers only observe — to intervene, use
 hooks (above). `Session.stream()` is the async-iterator view of the same events, for
 consumers that would rather `async for` than register a callback.
+
+### Session event log
+
+Every `kennel` run keeps its events in a local JSON Lines file, so a failure can be looked at
+after the fact instead of only while it happens:
+
+```
+~/.local/state/kennel/sessions/<session_id>.jsonl
+{"t": 1789817185.923, "type": "session.started", "session_id": "06c84876ce05", "workspace": "/Users/me/meetings", "model": "MockModel", "tools": ["glob", "grep", "read"]}
+{"t": 1789817185.924, "type": "tool.requested", "session_id": "06c84876ce05", "tool": "read", "summary": "Read transcripts/2026-09-16.txt"}
+```
+
+Each line is one event in the same flat form `--trace` writes to stderr (`t`, `type`,
+`session_id`, then the event's own data), so it carries summaries, sizes and timings and never
+file contents or generated text. The location is `KENNEL_STATE_DIR`, else
+`$XDG_STATE_HOME/kennel`, else `~/.local/state/kennel`; `/status` and `kennel doctor` print
+it. `--no-log` or `"logging": {"events": false}` turns it off. Nothing is uploaded and nothing
+is rotated for you — the files are yours to `tail`, attach to an issue or delete.
+
+In the SDK the log is **opt-in**, so embedding Kennel does not start writing files behind an
+application's back: pass `KennelConfig(log_events=True)` (or the config key) to get the same
+per-session file, or subscribe `kennel.JsonlEventLog(path)` yourself for full control.
 
 The default instructions tell the model to glob, then grep/read, then answer, and include a
 one-line overview of the workspace's top-level entries. On the on-device model this is what
@@ -567,6 +610,7 @@ approved from the prompt, planned for a later version). All keys are optional.
     "llama-cpp": { "model_path": "~/models/Qwen3-4B-Q4_K_M.gguf", "n_ctx": 16384 }
   },
   "permission_mode": "default",
+  "logging": { "events": true },
   "permissions": {
     "write": "ask",
     "write(docs/**)": "allow",

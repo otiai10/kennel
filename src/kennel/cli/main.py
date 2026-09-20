@@ -13,6 +13,7 @@ import time
 import traceback
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from .. import __version__
 from ..agent import Agent
@@ -79,8 +80,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TEXT|@FILE",
         help="with -p: answer under a JSON schema (guided generation) instead of prose",
     )
-    p.add_argument("--verbose", action="store_true", help="show tool result sizes and diagnostics")
+    p.add_argument("--verbose", action="store_true", help="add tool timings and diagnostic logging (sizes are shown anyway)")
     p.add_argument("--trace", action="store_true", help="write every agent event as JSON to stderr")
+    p.add_argument(
+        "--no-log",
+        action="store_true",
+        help="do not keep this session's event log (= the \"logging\": {\"events\": false} config key); "
+        "the log is a local JSON Lines file under KENNEL_STATE_DIR, ~/.local/state/kennel by default",
+    )
     p.add_argument("--version", action="version", version=f"kennel {__version__}")
     return p
 
@@ -136,6 +143,38 @@ def load_schema(value: str | None) -> dict | None:
     return schema
 
 
+def exit_code_for(exc: KennelError) -> int:
+    """The exit code an error maps to: 3 model unavailable, 2 bad configuration, 1 otherwise."""
+    if isinstance(exc, ModelUnavailableError):
+        return 3
+    if isinstance(exc, ConfigurationError):
+        return 2
+    return 1
+
+
+def failure_line(message: str, failure: dict[str, Any] | None) -> str:
+    """The error plus what the failed turn actually sent, as one line for the user.
+
+    ``failure`` is :attr:`kennel.Session.last_failure`. Only counted or provider-reported
+    numbers go in, and the context figure says when it is an estimate (principle 4).
+    """
+    if not failure:
+        return message
+    parts = [message.rstrip(". ") + "."]
+    status = failure.get("status")
+    if status is not None and str(status) not in message:
+        parts.append(f"Provider status {status}.")  # Apple's own message already spells it out
+    parts.append(f"This turn added {failure.get('tool_output_bytes', 0):,} bytes of tool output;")
+    used = failure.get("context_tokens_before") or 0
+    window = failure.get("context_window_tokens")
+    qualifier = " (estimated)" if failure.get("estimated") else ""
+    if window:
+        parts.append(f"context was ~{used:,} / {window:,} tokens{qualifier} before the request.")
+    else:
+        parts.append(f"context was ~{used:,} tokens{qualifier}, window unknown, before the request.")
+    return " ".join(parts)
+
+
 #: The legacy flags are sugar for a mode, in this precedence order.
 MODE_FLAGS: tuple[tuple[str, PermissionMode], ...] = (
     ("read_only", PermissionMode.READ_ONLY),
@@ -181,6 +220,12 @@ def build_agent(args: argparse.Namespace, prompter: ConsolePrompter | None) -> A
         provider=args.provider,
         providers=_provider_options_from_env(),
     )
+    # The CLI keeps a session event log by default, so a failure can be looked at afterwards;
+    # the config file can turn it off and --no-log always wins. The SDK default stays opt-in.
+    if args.no_log:
+        config = config.merged(log_events=False)
+    elif config.log_events is None:
+        config = config.merged(log_events=True)
     # The provider is left to Agent, which resolves config.provider through the registry.
     return Agent(
         args.workspace,
@@ -254,14 +299,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.prompt is not None:
             return run_once(agent, args.prompt, renderer, prompter, machine_out, schema)
         return run_interactive(agent, renderer, prompter)
-    except ModelUnavailableError as exc:
-        return _fail(renderer, machine_out, str(exc), 3)
-    except ConfigurationError as exc:
-        return _fail(renderer, machine_out, str(exc), 2)
     except KennelError as exc:
-        if args.verbose:
+        code = exit_code_for(exc)
+        if args.verbose and code == 1:  # a bug worth a traceback, not a bad flag or a missing model
             traceback.print_exc()
-        return _fail(renderer, machine_out, str(exc), 1)
+        return _fail(renderer, machine_out, str(exc), code)
     except KeyboardInterrupt:
         return 130
     except BrokenPipeError:
@@ -327,13 +369,27 @@ def run_once(
 ) -> int:
     loop = asyncio.new_event_loop()
     session = agent.new_session()
+    result: AgentResult | None = None
+    failed: KennelError | None = None
+    failure: dict[str, Any] | None = None
+    code = 0
     try:
-        result = _run_turn(loop, session, prompt, renderer, prompter, machine_out, schema)
+        try:
+            result = _run_turn(loop, session, prompt, renderer, prompter, machine_out, schema)
+        except KennelError as exc:
+            # Reported here rather than in main() so the failed turn's own facts are still
+            # reachable through the session.
+            failed, code = exc, exit_code_for(exc)
+            if renderer.verbose:
+                traceback.print_exc()
         renderer.finish_answer()
-        if renderer.verbose:
-            renderer.note(f"(context: {session.context_usage().summary()})")
-        code = 0
-        if result is None:
+        # Shown by default: an on-device window is small enough that "how much is left" is a
+        # decision the user makes every turn. note() stays quiet in the machine formats.
+        renderer.note(f"(context: {session.context_usage().summary()})")
+        failure = session.last_failure
+        if failed is not None:
+            renderer.error(failure_line(str(failed), failure))
+        elif result is None:
             code = 130
         elif result.stop_reason == "timeout":
             renderer.error("the model did not finish within the turn timeout")
@@ -344,7 +400,9 @@ def run_once(
         loop.run_until_complete(session.close())  # the closing events precede the result line
         loop.close()
     if machine_out is not None:
-        if result is None:
+        if failed is not None:
+            machine_out.error(str(failed), failure=failure)
+        elif result is None:
             machine_out.error("the turn was cancelled", stop_reason="cancelled")
         else:
             machine_out.result(result)
@@ -513,11 +571,10 @@ def run_interactive(agent: Agent, renderer: Renderer, prompter: ConsolePrompter 
             try:
                 result = _run_turn(loop, session, line, renderer, prompter)
             except KennelError as exc:
-                renderer.error(str(exc))
+                renderer.error(failure_line(str(exc), session.last_failure))
                 continue
             renderer.finish_answer()
-            if renderer.verbose:
-                renderer.note(f"(context: {session.context_usage().summary()})")
+            renderer.note(f"(context: {session.context_usage().summary()})")
             if result is not None and result.stop_reason == "tool_limit":
                 renderer.note("(tool call limit reached; answer may be incomplete)")
             elif result is not None and result.stop_reason == "timeout":
