@@ -430,9 +430,10 @@ class Session:
                 failed = ProviderError(f"The model request failed: {exc}", provider_error=str(exc))
                 await self._fail_turn(failed, prompt, text, started, before)
                 raise failed from exc
-        if schema is None and stop_reason == "end_turn" and self._should_nudge(text):
+        nudge_rule = self._should_nudge(text) if schema is None and stop_reason == "end_turn" else None
+        if nudge_rule is not None:
             # The model narrated tool steps instead of taking them: continue once.
-            self._emit(EventType.MODEL_NUDGED, chars=len(text))
+            self._emit(EventType.MODEL_NUDGED, chars=len(text), rule=nudge_rule)
             try:
                 text = await asyncio.wait_for(self._generate(NUDGE_PROMPT, on_delta), timeout)
             except asyncio.CancelledError:
@@ -537,11 +538,19 @@ class Session:
                 extra.append(str(added).strip())
         return "\n\n".join([prompt, *extra]) if extra else prompt
 
-    def _should_nudge(self, text: str) -> bool:
+    def _should_nudge(self, text: str) -> str | None:
+        """The narration rule that fired, or ``None`` if this turn should not be nudged.
+
+        A turn that already called a tool (this one, or immediately before it) is
+        answering from what it just saw, not narrating unseen steps: nudging it
+        would re-run the same tools and double the answer for no reason (#33).
+        """
         if not self.agent.tools or not self.agent.config.nudge_narration:
-            return False
+            return None
         if self.runner.turn_records():
-            return False
+            return None
+        if self.history and self.history[-1].tool_calls:
+            return None
         return looks_like_tool_narration(text, self.agent.tools)
 
     async def _generate(self, prompt: str, on_delta: Callable[[str], None] | None) -> str:

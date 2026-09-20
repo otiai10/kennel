@@ -92,3 +92,19 @@ def test_looks_like_tool_narration():
     assert not looks_like_tool_narration("The decision was to ship v0.1 on Friday.", tools)
     assert not looks_like_tool_narration("確認しました。決定事項は以下です。", tools)
     assert not looks_like_tool_narration("", tools)
+    # AC-3: a tool name that is also an ordinary English word must not fire on its
+    # own; only an explicit "the <name> tool" / "tool <name>" mention counts.
+    assert not looks_like_tool_narration("Please edit the summary", ["edit", "read", "write", "shell"])
+    assert looks_like_tool_narration("I'd need to use the edit tool for that.", ["edit", "read", "write", "shell"]) == "tool_name"
+
+
+def test_looks_like_tool_narration_rule_names():
+    """AC-2: the returned rule identifies which check fired, for `model.nudged.rule`."""
+    from kennel.context import looks_like_tool_narration
+
+    tools = ["glob", "grep", "read"]
+    assert looks_like_tool_narration("```bash\ngrep x\n```", tools) == "code_block"
+    assert looks_like_tool_narration("このプロジェクトに関連するファイルは以下です。", tools) == "file_mention"
+    assert looks_like_tool_narration("I would call the grep tool now.", tools) == "tool_name"
+    assert looks_like_tool_narration("Let me search the workspace.", tools) == "phrase"
+    assert looks_like_tool_narration("The decision was to ship v0.1 on Friday.", tools) is None
