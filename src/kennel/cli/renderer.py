@@ -86,12 +86,13 @@ class Renderer:
             self._line(s.dim("  ↻ context compacted"))
 
     def _tool_result(self, data: dict[str, Any]) -> str:
-        """``  ↳ 22,757 bytes (~5,690 tokens, exceeds the 4,096-token window)``.
+        """``  ↳ 22,757 bytes (~5,690 tokens, exceeds the 4,096-token window, withheld)``.
 
         Shown whether or not ``--verbose`` is on, because a result that cannot fit the window
         is the one thing the user can act on before the turn fails; ``--verbose`` only adds the
         timing. The token figure is an estimate and is named as one (principle 4). A result
-        that does not fit turns the line yellow.
+        that does not fit turns the line yellow, and ``withheld`` says the runner kept it out
+        of the conversation rather than letting the request fail on it.
         """
         s = self.style
         notes: list[str] = []
@@ -104,6 +105,8 @@ class Renderer:
             notes.append(f"exceeds the {window:,}-token window")
         if data.get("truncated"):
             notes.append("truncated")
+        if data.get("withheld"):
+            notes.append("withheld")
         line = f"  ↳ {data.get('output_bytes', 0):,} bytes"
         if notes:
             line += f" ({', '.join(notes)})"

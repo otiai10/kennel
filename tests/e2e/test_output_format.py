@@ -94,6 +94,7 @@ TOOL_COMPLETED_KEYS = {
     "estimated_tokens",
     "context_window_tokens",
     "window_exceeded",
+    "withheld",
     "truncated",
     "duration_ms",
     "metadata",
@@ -112,6 +113,7 @@ def test_stream_json_tool_completed_reports_the_size_in_bytes_and_tokens(meeting
     assert data["output_bytes"] > 20_000
     assert data["estimated_tokens"] == -(-data["output_bytes"] // 4)  # ceil(bytes / 4)
     assert data["context_window_tokens"] == 4096 and data["window_exceeded"] is True
+    assert data["withheld"] is True  # issue #47: it was measured, then kept out of the turn
     assert "(context" not in p.stdout  # the human lines stay out of a machine format
 
 
@@ -216,4 +218,5 @@ def test_to_dict_is_json_serializable_with_every_tool_call_field():
         "duration_ms": 1.5,
         "error": None,
         "metadata": {"lines": 3},
+        "withheld": False,
     }

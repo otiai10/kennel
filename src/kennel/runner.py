@@ -3,7 +3,10 @@
 Validation, guardrails, hooks, permission, execution, output bounding and events
 all happen here, so the agent loop stays provider-driven and the Agent class
 holds no tool logic. Errors are returned to the model as short ``Error: ...``
-strings so it can adapt; they are also recorded for the trace.
+strings so it can adapt; they are also recorded for the trace. A result too big for the
+provider's whole context window is one of those cases: it is measured, then withheld and
+replaced by a short instruction to ask for a smaller part, because handing it over does not
+shorten the conversation, it fails the request.
 
 ``before_tool`` hooks run after validation and before the permission check, so an
 application policy can deny a call the policy would have allowed, or correct its
@@ -35,6 +38,16 @@ from .tools.base import Tool, ToolContext, ToolResult
 
 log = logging.getLogger(__name__)
 
+#: What the model is given in place of a result that is larger than its whole context
+#: window. Handing such a result over does not truncate the conversation, it fails the
+#: request (Apple answers status 255), so the model is told how to ask for less instead.
+WINDOW_EXCEEDED_NOTICE = (
+    "Error: the {tool} result is ~{tokens:,} tokens, larger than this model's "
+    "{window:,}-token context window, so it was not added to the conversation. "
+    "Ask for a smaller part: read a line range (start_line/end_line), grep for the "
+    "words you need, or work through the file section by section."
+)
+
 
 @dataclass
 class ToolCallRecord:
@@ -47,6 +60,10 @@ class ToolCallRecord:
     duration_ms: float = 0.0
     error: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: The result was measured but not handed to the model: it does not fit the window
+    #: on its own, so the model got :data:`WINDOW_EXCEEDED_NOTICE` instead. The sizes above
+    #: still describe the result the tool produced.
+    withheld: bool = False
 
 
 class ToolRunner:
@@ -212,15 +229,25 @@ class ToolRunner:
 
         content, truncated = truncate_text(result.content, self._context.limits.max_output_bytes)
         truncated = truncated or result.truncated
-        duration = (time.perf_counter() - started) * 1000
-        record = self._record(
-            ToolCallRecord(name, args, summary, "ok", len(content.encode()), truncated, duration, None, dict(result.metadata))
-        )
+        output_bytes = len(content.encode())
         # An estimate, and named as one: the on-device provider counts no tokens, so this is
         # what lets a caller (and the CLI) see a result that cannot fit before the model chokes
         # on it. The comparison is about this one result, not about the live context.
-        estimated_tokens = math.ceil(estimate_tokens_from_bytes(record.output_bytes))
+        estimated_tokens = math.ceil(estimate_tokens_from_bytes(output_bytes))
         window = self.context_window_tokens
+        # The output limit bounds every result (``tools.max_output_bytes``, whatever the user
+        # set it to); this only asks whether what came through it still cannot fit the window
+        # at all. Such a result is not worth handing over: the request fails instead of the
+        # model reading it. So it is withheld and the model is told how to ask for less, which
+        # keeps the turn alive and leaves the limit, and the meaning of ``truncated``, alone.
+        window_exceeded = window is not None and estimated_tokens > window
+        duration = (time.perf_counter() - started) * 1000
+        record = self._record(
+            ToolCallRecord(
+                name, args, summary, "ok", output_bytes, truncated, duration, None,
+                dict(result.metadata), withheld=window_exceeded,
+            )
+        )
         self._emit(
             EventType.TOOL_COMPLETED,
             tool=name,
@@ -228,11 +255,14 @@ class ToolRunner:
             output_bytes=record.output_bytes,
             estimated_tokens=estimated_tokens,
             context_window_tokens=window,
-            window_exceeded=window is not None and estimated_tokens > window,
+            window_exceeded=window_exceeded,
+            withheld=record.withheld,
             truncated=truncated,
             duration_ms=duration,
             metadata=dict(result.metadata),
         )
+        if record.withheld:
+            return WINDOW_EXCEEDED_NOTICE.format(tool=name, tokens=estimated_tokens, window=window)
         return content
 
     async def _before_tool(

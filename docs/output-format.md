@@ -81,11 +81,12 @@ The fields of `kennel.ToolCallRecord`:
 | `arguments` | object | validated arguments |
 | `summary` | string | one-line human summary (`Read README.md [1-50]`) |
 | `status` | `"ok"` \| `"error"` \| `"denied"` \| `"blocked"` \| `"invalid"` | outcome |
-| `output_bytes` | integer | size of the result handed to the model |
+| `output_bytes` | integer | size of the result the tool produced (what the model received, unless `withheld`) |
 | `truncated` | boolean | the result was cut to the output limit |
 | `duration_ms` | number | execution time |
 | `error` | string \| null | why it failed |
 | `metadata` | object | tool-specific extras |
+| `withheld` | boolean | the result was too big for the model's whole context window, so the model got a short "ask for a smaller part" instruction instead of it |
 
 ### Failure object
 
@@ -100,7 +101,7 @@ provider; nothing here is inferred (constitution principle 4).
 | `error_type` | string | the Kennel error class (`ProviderError`, `ContextLimitError`, ...) |
 | `status` | integer \| null | the status code the provider reported, when it reports one (Apple's `255` is `GenerationErrorCode.UNKNOWN_ERROR`) |
 | `provider_error` | string \| null | the provider's own wording, when Kennel replaced it with a friendlier message |
-| `tool_output_bytes` | integer | how many bytes of tool output this turn handed the model |
+| `tool_output_bytes` | integer | how many bytes of tool output this turn produced, withheld results included |
 | `tool_calls` | integer | how many tool calls this turn made |
 | `context_tokens_before` | integer | how full the window was **before** the request |
 | `context_window_tokens` | integer \| null | the window the provider declares, `null` when it declares none |
@@ -118,7 +119,7 @@ provider gives no way to tell whether the failed prompt stayed in its transcript
 `stream-json` only. One line per event, in the order the agent emitted them:
 
 ```json
-{"type": "tool.completed", "session_id": "2f1c9a4b7e03", "timestamp": 1789531200.42, "data": {"tool": "read", "summary": "Read README.md", "output_bytes": 1024, "estimated_tokens": 256, "context_window_tokens": 4096, "window_exceeded": false, "truncated": false, "duration_ms": 3.1, "metadata": {}}}
+{"type": "tool.completed", "session_id": "2f1c9a4b7e03", "timestamp": 1789531200.42, "data": {"tool": "read", "summary": "Read README.md", "output_bytes": 1024, "estimated_tokens": 256, "context_window_tokens": 4096, "window_exceeded": false, "withheld": false, "truncated": false, "duration_ms": 3.1, "metadata": {}}}
 ```
 
 | Key | Type | Meaning |
@@ -147,11 +148,17 @@ tokens:
 | `estimated_tokens` | integer | what those bytes are estimated to cost. An estimate, as the name says: the on-device provider counts no tokens (constitution principle 4) |
 | `context_window_tokens` | integer \| null | the window the provider declares, `null` when it declares none |
 | `window_exceeded` | boolean | `estimated_tokens > context_window_tokens` — **this one result** is already too big for the window, whatever else the conversation holds. It is not a statement about how full the context currently is; for that, use `Session.context_usage()`. Always `false` when the provider declares no window |
+| `withheld` | boolean | what the runner did about it: the result was **not** handed to the model, which got a short instruction to ask for a smaller part (a line range, a grep) instead. `window_exceeded` is the observation, `withheld` the intervention; today the second follows the first, and the sizes above keep describing the result the tool produced, not the notice |
+
+A withheld result costs the model nothing but the notice, so `Session.context_usage()` does
+not count it. The output limit is untouched by all this: `tools.max_output_bytes` (default
+65,536) still bounds every result, and setting it below the window is how a caller goes back
+to receiving truncated content instead of the notice.
 
 The CLI draws this line for every tool call whether or not `--verbose` is set
-(`↳ 20,008 bytes (~5,002 tokens, exceeds the 4,096-token window)`, in yellow when the window
-is exceeded), and prints `(context: ...)` after each turn. `--verbose` only adds the timing.
-Neither appears in `json` / `stream-json` mode, where stdout is JSON alone.
+(`↳ 20,008 bytes (~5,002 tokens, exceeds the 4,096-token window, withheld)`, in yellow when
+the window is exceeded), and prints `(context: ...)` after each turn. `--verbose` only adds
+the timing. Neither appears in `json` / `stream-json` mode, where stdout is JSON alone.
 
 `model.delta` carries `{"text": "..."}` — the generated fragment. Guided generation arrives
 whole, so a `--json-schema` turn emits exactly one `model.delta` holding the document. Every
