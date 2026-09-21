@@ -442,6 +442,28 @@ async def test_nudge_skipped_right_after_a_tool_turn(meeting_ws):
     assert EventType.MODEL_NUDGED not in [e.type for e in events]
 
 
+async def test_nudge_skipped_right_after_a_failed_tool_turn(meeting_ws):
+    """AC-1 (#46): `_fail_turn` (#30) records a failed turn with the tool calls it made,
+    the same shape as a successful one, and `_should_nudge` does not distinguish the two
+    (adopted interpretation (b) in the Issue #46 decision table). Narration right after a
+    failure is left alone rather than nudged into re-running the tools that likely just
+    overflowed the window."""
+    turns = [
+        [ToolCall("read", {"path": "transcripts/2026-09-16.txt"}), Raise(ProviderError("boom", status=255))],
+        NARRATION,
+    ]
+    agent, provider, events = make_agent(meeting_ws, turns)
+    session = agent.new_session()
+    with pytest.raises(ProviderError):
+        await session.run("summarize")
+    assert session.history[-1].stop_reason == "error" and session.history[-1].tool_calls
+    events.clear()
+    result = await session.run("続けて")
+    assert result.text == NARRATION  # not nudged: the narration stands as the answer
+    assert len(provider.sessions) == 2 and len(provider.sessions[1].prompts) == 1
+    assert EventType.MODEL_NUDGED not in [e.type for e in events]
+
+
 async def test_nudge_disabled_by_config_or_without_tools(meeting_ws):
     agent, provider, _ = make_agent(meeting_ws, [NARRATION], config=KennelConfig(nudge_narration=False))
     assert (await agent.run("x")).text == NARRATION and len(provider.sessions[0].prompts) == 1
