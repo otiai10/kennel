@@ -288,7 +288,9 @@ class Session:
         total = estimate_tokens(self._window_instructions)
         for turn in self.history[self._window_turn_start :]:
             total += estimate_tokens(turn.prompt) + estimate_tokens(turn.response)
-            total += sum(estimate_tokens_from_bytes(c.output_bytes) for c in turn.tool_calls)
+            # A withheld result never reached the provider session (ToolRunner.invoke gave the
+            # model a one-line notice instead), so its bytes are not in the window.
+            total += sum(estimate_tokens_from_bytes(c.output_bytes) for c in turn.tool_calls if not c.withheld)
         return total
 
     # -- failing --------------------------------------------------------------
