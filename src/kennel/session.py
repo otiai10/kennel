@@ -544,6 +544,15 @@ class Session:
         A turn that already called a tool (this one, or immediately before it) is
         answering from what it just saw, not narrating unseen steps: nudging it
         would re-run the same tools and double the answer for no reason (#33).
+
+        This also suppresses the nudge right after a turn that called tools and then
+        *failed* (``stop_reason == "error"``, recorded by :meth:`_fail_turn`): the check
+        below only looks at whether that turn made tool calls, not whether it completed.
+        This is deliberate, not an oversight (#46): re-running the tools that a failed
+        turn already called is exactly what is likely to overflow the context window
+        again, so staying quiet is the safe default. The alternative — nudging because
+        the model "hasn't really answered from a result yet" — was considered and
+        rejected precisely because it would retry into the same failure.
         """
         if not self.agent.tools or not self.agent.config.nudge_narration:
             return None
