@@ -157,19 +157,33 @@ class Session:
 
     async def _provider(self, extra_instructions: str = "") -> ProviderSession:
         if self._provider_session is None:
-            instructions = self.agent.instructions
-            if extra_instructions:
-                instructions = f"{instructions}\n\n{extra_instructions}"
+            instructions = self._compose_instructions(extra_instructions)
             self._provider_session = await self.agent.provider.create_session(
                 instructions=instructions,
                 tools=list(self.agent.tools.values()),
                 invoke=self.runner.invoke,
             )
-            # What the live window holds, for context_usage(): these instructions
-            # plus whatever turns follow. Earlier turns are only in the summary.
-            self._window_instructions = instructions
-            self._window_turn_start = len(self.history)
+            self._reset_window(extra_instructions)
         return self._provider_session
+
+    def _compose_instructions(self, extra_instructions: str) -> str:
+        if not extra_instructions:
+            return self.agent.instructions
+        return f"{self.agent.instructions}\n\n{extra_instructions}"
+
+    def _reset_window(self, extra_instructions: str = "") -> None:
+        """Point the estimated-window bookkeeping at what a fresh provider session holds.
+
+        Called whenever the live provider session restarts — a new one in
+        :meth:`_provider`, or the summary session :meth:`compact` is about to open —
+        so :meth:`context_usage` reflects that session's instructions plus whatever
+        turns follow, not the history from before the restart (#45: without this,
+        `compact()` freed the provider session but a caller reading `context_usage()`
+        before the next `_provider()` call — the failed-turn report, `/status` — kept
+        seeing the pre-compaction size).
+        """
+        self._window_instructions = self._compose_instructions(extra_instructions)
+        self._window_turn_start = len(self.history)
 
     async def _drop_provider(self) -> None:
         session, self._provider_session = self._provider_session, None
@@ -210,8 +224,7 @@ class Session:
         await self._drop_provider()
         self.history.clear()
         self.compactions = 0
-        self._window_instructions = self.agent.instructions
-        self._window_turn_start = 0
+        self._reset_window()
 
     def status(self) -> dict[str, Any]:
         return {
@@ -573,10 +586,15 @@ class Session:
         """Replace the provider session with a fresh one seeded by a compact summary of the history.
 
         Returns ``False`` (no-op, no event emitted) if there is no history to compact.
+        The estimated-window bookkeeping (:meth:`context_usage`) is reset immediately,
+        to the size of the summary rather than the history it replaces (#45) — a caller
+        that reads it right after (a failed turn's report, `/status`) before the next
+        `_provider()` call sees the post-compaction size, not the pre-compaction one.
         """
         if not self.history:
             return False
         await self._drop_provider()
         self.compactions += 1
+        self._reset_window(self._compaction_note())
         self._emit(EventType.CONTEXT_COMPACTED, turns=len(self.history))
         return True

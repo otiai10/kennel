@@ -691,6 +691,61 @@ async def test_clear_resets_context_usage(meeting_ws):
     await session.close()
 
 
+async def test_explicit_compact_lowers_context_usage_immediately(meeting_ws):
+    """AC-1 (#45): compact() must update the estimate itself, not wait for the next
+    _provider() call to open a session and only then reset the window bookkeeping."""
+    (meeting_ws / "big.txt").write_text("x" * 20000)
+    turns = [[ToolCall("read", {"path": "big.txt"}), Text("read it")]]
+    agent, _, _ = make_agent(meeting_ws, turns)
+    session = agent.new_session()
+    await session.run("read the big file")
+    before = session.context_usage()
+    assert before.used_tokens > before.window_tokens  # the 20KB tool result overflowed it
+    compacted = await session.compact()
+    assert compacted is True
+    after = session.context_usage()
+    assert after.used_tokens < before.used_tokens
+    assert after.used_tokens < after.window_tokens  # no next _provider() call happened yet
+    await session.close()
+
+
+async def test_second_consecutive_failure_context_before_excludes_prior_tool_output(meeting_ws):
+    """AC-2 (#45): a failed turn's compact() retires its provider session; the very next
+    turn's pre-request estimate must reflect that immediately, not the tool output the
+    failed turn produced (it was already recorded in `history` for #30's reporting, but
+    the live window it counted against is gone)."""
+    (meeting_ws / "big.txt").write_text("x" * 20000)
+    turns = [
+        [ToolCall("read", {"path": "big.txt"}), Raise(ProviderError("boom", status=255))],
+        [Raise(ProviderError("boom2", status=255))],
+    ]
+    agent, _, _ = make_agent(meeting_ws, turns)
+    session = agent.new_session()
+    with pytest.raises(ProviderError):
+        await session.run("first")
+    first_failure = dict(session.last_failure)
+    with pytest.raises(ProviderError):
+        await session.run("second")
+    second_failure = session.last_failure
+    window = session.context_usage().window_tokens
+    assert first_failure["tool_output_bytes"] > 0
+    assert second_failure["context_tokens_before"] < window  # not still carrying the 20KB read
+
+
+async def test_status_context_after_failure_reflects_compaction(meeting_ws):
+    """AC-3 (#45): /status (and /usage) read right after a failed turn must show the
+    post-compaction size, since they call context_usage() before any new request runs."""
+    (meeting_ws / "big.txt").write_text("x" * 20000)
+    turns = [[ToolCall("read", {"path": "big.txt"}), Raise(ProviderError("boom", status=255))]]
+    agent, _, _ = make_agent(meeting_ws, turns)
+    session = agent.new_session()
+    with pytest.raises(ProviderError):
+        await session.run("read it")
+    usage = session.context_usage()
+    assert usage.compactions == 1 and usage.used_tokens < usage.window_tokens
+    assert session.status()["context"] == usage.summary()
+
+
 async def test_apple_provider_declares_the_on_device_window():
     from kennel.providers.apple import AppleProvider
 
