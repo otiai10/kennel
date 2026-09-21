@@ -693,14 +693,19 @@ async def test_clear_resets_context_usage(meeting_ws):
 
 async def test_explicit_compact_lowers_context_usage_immediately(meeting_ws):
     """AC-1 (#45): compact() must update the estimate itself, not wait for the next
-    _provider() call to open a session and only then reset the window bookkeeping."""
-    (meeting_ws / "big.txt").write_text("x" * 20000)
-    turns = [[ToolCall("read", {"path": "big.txt"}), Text("read it")]]
+    _provider() call to open a session and only then reset the window bookkeeping.
+
+    Each read stays under the window on its own (a single result at or over the window
+    is withheld from the model and from the estimate: #47), so the overflow here comes
+    from two sub-window reads stacking up, not from either one alone.
+    """
+    (meeting_ws / "big.txt").write_text("x" * 12000)
+    turns = [[ToolCall("read", {"path": "big.txt"}), ToolCall("read", {"path": "big.txt"}), Text("read it")]]
     agent, _, _ = make_agent(meeting_ws, turns)
     session = agent.new_session()
-    await session.run("read the big file")
+    await session.run("read the big file twice")
     before = session.context_usage()
-    assert before.used_tokens > before.window_tokens  # the 20KB tool result overflowed it
+    assert before.used_tokens > before.window_tokens  # the two reads together overflowed it
     compacted = await session.compact()
     assert compacted is True
     after = session.context_usage()
