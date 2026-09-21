@@ -126,8 +126,7 @@ class Session:
         self._event_log: JsonlEventLog | None = None
         self._stop_logging: Callable[[], None] | None = None
         self._provider_session: ProviderSession | None = None
-        self._window_instructions = agent.instructions
-        self._window_turn_start = 0
+        self._reset_window(agent.instructions)
         self._started = False
         self._failed = False
         self._task: asyncio.Task[Any] | None = None
@@ -163,7 +162,7 @@ class Session:
                 tools=list(self.agent.tools.values()),
                 invoke=self.runner.invoke,
             )
-            self._reset_window(extra_instructions)
+            self._reset_window(instructions)
         return self._provider_session
 
     def _compose_instructions(self, extra_instructions: str) -> str:
@@ -171,8 +170,12 @@ class Session:
             return self.agent.instructions
         return f"{self.agent.instructions}\n\n{extra_instructions}"
 
-    def _reset_window(self, extra_instructions: str = "") -> None:
+    def _reset_window(self, instructions: str) -> None:
         """Point the estimated-window bookkeeping at what a fresh provider session holds.
+
+        ``instructions`` is the full text that session was (or will be) opened with —
+        already composed by :meth:`_compose_instructions`, not re-derived here, so
+        callers that already built it for :meth:`create_session` do not pay for it twice.
 
         Called whenever the live provider session restarts — a new one in
         :meth:`_provider`, or the summary session :meth:`compact` is about to open —
@@ -182,7 +185,7 @@ class Session:
         before the next `_provider()` call — the failed-turn report, `/status` — kept
         seeing the pre-compaction size).
         """
-        self._window_instructions = self._compose_instructions(extra_instructions)
+        self._window_instructions = instructions
         self._window_turn_start = len(self.history)
 
     async def _drop_provider(self) -> None:
@@ -224,7 +227,7 @@ class Session:
         await self._drop_provider()
         self.history.clear()
         self.compactions = 0
-        self._reset_window()
+        self._reset_window(self.agent.instructions)
 
     def status(self) -> dict[str, Any]:
         return {
@@ -595,6 +598,6 @@ class Session:
             return False
         await self._drop_provider()
         self.compactions += 1
-        self._reset_window(self._compaction_note())
+        self._reset_window(self._compose_instructions(self._compaction_note()))
         self._emit(EventType.CONTEXT_COMPACTED, turns=len(self.history))
         return True
