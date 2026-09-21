@@ -135,15 +135,23 @@ returns to the prompt (twice at the prompt exits); `Ctrl-D` exits.
 
 The on-device model's context window is about 4k tokens, which is the tightest constraint in
 practice, so every tool result is reported with what it costs and every answer ends with how
-full the window is. A single file that cannot fit says so in yellow, before the turn fails:
+full the window is. A result that cannot fit the window on its own is not handed to the model
+at all — it would fail the request rather than shorten it — so Kennel says so in yellow and
+tells the model to ask for a smaller part instead:
 
 ```text
 > read big.txt and summarize it
 ● Read big.txt
-  ↳ 20,008 bytes (~5,002 tokens, exceeds the 4,096-token window)
-done
-(context: 100% of 4096 tokens (5279 tokens, estimated))
+  ↳ 20,008 bytes (~5,002 tokens, exceeds the 4,096-token window, withheld)
+● Read big.txt [1-200]
+  ↳ 4,912 bytes (~1,228 tokens)
+big.txt starts with ...
+(context: 38% of 4096 tokens (1556 tokens, estimated))
 ```
+
+Only the whole-window case is withheld; everything else is bounded by `tools.max_output_bytes`
+(64KB by default) as before. Lowering that setting below the window is how you go back to
+receiving truncated content instead of the notice.
 
 The token figures are estimates and say so; the on-device model exposes no token counter, and
 Kennel does not dress an estimate up as a measurement. `/usage` is the longer form:
