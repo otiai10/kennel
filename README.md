@@ -9,7 +9,7 @@ event stream, and a CLI. Everything runs on your Mac; nothing leaves it by defau
 ```text
 $ kennel ~/meetings
 
-Kennel v0.0.3
+Kennel v0.1.0
 workspace: /Users/me/meetings
 model: Apple SystemLanguageModel
 mode: local
@@ -57,7 +57,7 @@ To try it without installing:
 uvx --from "git+https://github.com/otiai10/kennel" kennel --help
 ```
 
-Plain pip into an existing environment works too. Pin a tag or branch with `@v0.0.3` at the end of the URL.
+Plain pip into an existing environment works too. Pin a tag or branch with `@v0.1.0` at the end of the URL.
 
 ```bash
 pip install "git+https://github.com/otiai10/kennel"
@@ -690,11 +690,15 @@ spikes/                               Phase 0 SDK experiments (not production co
 
 ## Status
 
-v0.0.3 plus the unreleased main branch: interactive and one-shot CLI with `kennel doctor`,
-machine-readable output (`--output-format`, `--json-schema`), permission modes and rule
-syntax, hooks, `Session.stream()` / `interrupt()` / `context_usage()`, MockProvider-based test
-suite, structured meeting summary example, and two llama.cpp providers for a larger context
-window (`llama-server` over HTTP, `llama-cpp` in this process). Not yet: web search provider,
-persistent sessions, MCP, subagents, sandboxed shell. Design principles live in
+v0.1.0: interactive and one-shot CLI with `kennel doctor`, machine-readable output
+(`--output-format`, `--json-schema`), permission modes and rule syntax, hooks,
+`Session.stream()` / `interrupt()` / `context_usage()`, MockProvider-based test suite,
+structured meeting summary example, provider selection (`--provider`) with two llama.cpp
+providers for a larger context window (`llama-server` over HTTP, `llama-cpp` in this
+process), and the observability work that fills out this release: a per-session JSONL event
+log, tool result sizes and remaining context shown without `--verbose`, failed turns kept in
+the history with the facts of the failure, and a tool result too big for the window withheld
+instead of failing the turn. Not yet: web search provider, persistent sessions, MCP,
+subagents, sandboxed shell. Design principles live in
 [docs/constitution.md](docs/constitution.md); the comparison with Claude Code that drove the
 current roadmap is in `docs/history/`.

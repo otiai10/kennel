@@ -107,7 +107,7 @@ wheels = [
 
 [[package]]
 name = "kennel"
-version = "0.0.3"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "apple-fm-sdk", marker = "sys_platform == 'darwin'" },

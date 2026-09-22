@@ -38,7 +38,7 @@ def run_cli(args, ws: Path, script=None, stdin="", env=None):
 def test_help_and_version(meeting_ws):
     assert run_cli(["--help"], meeting_ws).returncode == 0
     p = run_cli(["--version"], meeting_ws)
-    assert p.returncode == 0 and "kennel 0.0.3" in p.stdout + p.stderr
+    assert p.returncode == 0 and "kennel 0.1.0" in p.stdout + p.stderr
 
 
 def test_one_shot_transcript_flow(meeting_ws):
@@ -200,7 +200,7 @@ def test_interactive_session(meeting_ws):
     p = run_cli([], meeting_ws, script=script, stdin=stdin)
     assert p.returncode == 0, p.stderr
     out = p.stdout
-    assert out.startswith("Kennel v0.0.3\nworkspace: ")
+    assert out.startswith("Kennel v0.1.0\nworkspace: ")
     assert "model: MockModel\nmode: local\npermissions: default\ntools: glob, grep, read, write (ask), edit (ask), shell (ask)" in out
     assert "/clear" in out and "forget the conversation" in out
     assert "/compact" in out and "/permissions" in out  # new commands are documented
