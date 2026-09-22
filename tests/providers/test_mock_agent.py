@@ -778,6 +778,30 @@ async def test_interrupt_lowers_context_usage_immediately(meeting_ws):
     await session.close()
 
 
+async def test_interrupt_falls_back_to_estimated_on_a_reporting_provider(meeting_ws):
+    """AC-1 (#57): on a provider that counts tokens itself, `estimated` must still flip to
+    True right after interrupt() retires the live session — there is nothing left to ask
+    `ProviderSession.usage()` until the next turn opens a new one, so the reading falls
+    back to the same window estimate an on-device provider would give."""
+    reported = Usage(input_tokens=1200, output_tokens=300)
+    agent, _, _ = slow_agent(meeting_ws, ["q1 done", [ToolCall("slow", {}), Text("never")]], reported_usage=reported)
+    session = agent.new_session()
+    await session.run("q1")
+    before = session.context_usage()
+    assert before.estimated is False and before.used_tokens == 1500
+
+    task = asyncio.create_task(session.run("now something slow"))
+    await asyncio.sleep(0.05)
+    session.interrupt()
+    with pytest.raises(TurnCancelledError):
+        await task
+    after = session.context_usage()
+    assert after.estimated is True
+    assert after.used_tokens < before.used_tokens
+    assert after.used_tokens == dropped_window_estimate(session)
+    await session.close()
+
+
 async def test_timeout_lowers_context_usage_immediately(meeting_ws):
     """AC-2 (#52): the timeout handler drops the provider session *before* run() appends the
     timed-out turn, so the estimate is derived at read time — that turn is then counted as part

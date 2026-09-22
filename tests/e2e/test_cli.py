@@ -41,6 +41,18 @@ def test_help_and_version(meeting_ws):
     assert p.returncode == 0 and "kennel 0.1.0" in p.stdout + p.stderr
 
 
+def test_readme_explains_the_estimated_fallback_for_reporting_providers():
+    """AC-3 (#57): the doc-only fix must be pinned in-repo, not just eyeballed once.
+
+    Both the llama-server and llama-cpp sections promise the same thing: right after
+    interrupt/timeout/failure/compact retires the live provider session, `/usage`
+    falls back to *estimated* even though the provider otherwise reports real counts.
+    """
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    assert "`/usage` briefly switches" in readme  # llama-server section
+    assert "As with `llama-server`, that flips back to" in readme  # llama-cpp section
+
+
 def test_one_shot_transcript_flow(meeting_ws):
     p = run_cli(["-p", "summarize the latest meeting", "--verbose"], meeting_ws)
     assert p.returncode == 0, p.stderr
