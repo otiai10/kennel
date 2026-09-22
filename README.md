@@ -513,6 +513,10 @@ kennel ~/meetings --provider llama-server
 - The context window comes from the server's `/props`, and the token counts come from the
   server itself — so with this provider `AgentResult.usage` is filled and `/usage` says
   *reported by the provider* instead of *estimated*.
+- Right after `Ctrl-C`, a timeout, a failed turn or `/compact`, `/usage` briefly switches
+  back to *estimated*: the provider session that was being counted just got retired, so
+  there is nothing left to ask, and the next turn opens a fresh one counted from a summary
+  (see `Session.context_usage()`).
 - Any OpenAI-compatible server (Ollama, LM Studio, mlx-lm) speaks the same protocol, but
   llama-server is the one Kennel is tested against.
 
@@ -564,7 +568,9 @@ kennel ~/meetings --provider llama-cpp
   `{"enable_thinking": true}` to let it think — either way the scratchpad is stripped and
   never appears in the answer.
 - Token counts come from the model's own tokenizer, so `AgentResult.usage` is filled and
-  `/usage` says *reported by the provider*.
+  `/usage` says *reported by the provider*. As with `llama-server`, that flips back to
+  *estimated* right after `Ctrl-C`, a timeout, a failed turn or `/compact` — the counted
+  session was retired, and the next one starts from a summary instead.
 - The model is loaded once, on the first turn, and shared by every session; `kennel doctor`
   and `Agent(...)` only check the import, the file and `n_ctx`, so neither waits for a load.
   One model is one KV cache, so turns are run one at a time.

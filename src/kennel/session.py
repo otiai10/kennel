@@ -293,6 +293,14 @@ class Session:
         Uses the provider's own count when it has one
         (:meth:`~kennel.ProviderSession.usage`) and falls back to estimating from
         the text in the live provider session, in which case ``estimated`` is True.
+
+        Right after an interrupt, a timeout, a failed turn or :meth:`compact`, the
+        live provider session has just been retired, so there is nothing left to ask
+        :meth:`~kennel.ProviderSession.usage` — ``estimated`` flips to True and
+        ``used_tokens`` drops to what the *next* session will open with (a summary of
+        the history so far), even on a provider that otherwise reports real counts.
+        That is not a lost conversation, just a switch from "what the retired session
+        held" to "what the next one will start with".
         """
         window = self.agent.provider.info.context_window_tokens
         measured = self._reported_usage()
