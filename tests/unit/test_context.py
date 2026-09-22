@@ -1,6 +1,14 @@
 import pytest
 
-from kennel.context import HistoryTurn, chunk_text, compact_history, map_reduce, truncate_text
+from kennel.context import (
+    HistoryTurn,
+    chunk_text,
+    compact_history,
+    estimate_tokens,
+    estimate_tokens_from_bytes,
+    map_reduce,
+    truncate_text,
+)
 
 
 def test_truncate_text():
@@ -9,6 +17,51 @@ def test_truncate_text():
     assert truncated and text.endswith("[output truncated]") and len(text.encode()) <= 40
     text, _ = truncate_text("日本語" * 50, 40)
     assert len(text.encode()) <= 40  # never splits a multibyte character
+
+
+# -- token estimation (#53) ---------------------------------------------------
+#
+# The on-device model exposes no tokenizer, so these pin the coefficients rather than
+# the tokenizer: the numbers came from finding the size at which a read result stops
+# fitting the declared 4,096-token window (docs/architecture.md §Context).
+
+JA_SENTENCE = "本日の議題は次期リリースの範囲とスケジュールの確認である。"
+
+
+def test_japanese_costs_more_per_character_than_latin():
+    """AC-1 (#53): per character, Japanese must estimate at least 2x English.
+
+    The ratio is the ratio of the coefficients (4.0 / 1.5 = 2.67). Byte-for-byte the two
+    land much closer, because a Japanese character is three UTF-8 bytes -- which is why the
+    comparison that matters here is per character.
+    """
+    japanese = (JA_SENTENCE * 300)[:6000]
+    english = ("the release scope and schedule review " * 200)[:6000]
+    assert len(japanese) == len(english) == 6000
+    assert estimate_tokens(japanese) == pytest.approx(4000)
+    assert estimate_tokens(english) == pytest.approx(1500)
+    assert estimate_tokens(japanese) >= 2 * estimate_tokens(english)
+
+
+def test_the_character_and_byte_estimates_of_the_same_text_stay_close():
+    """AC-5 (#53): the two estimators are used on different halves of one number
+    (`Session._estimate_window_tokens` counts prompts as text and tool output as bytes), so
+    they must not disagree about the same text. A regression guard on the coefficients:
+    Japanese used to come out 1.5x apart, which made the same conversation look one size in
+    `/status` and another on the tool line.
+    """
+    for text in (JA_SENTENCE * 100, "plain ascii prose, " * 300, JA_SENTENCE * 20 + "mixed ascii " * 50):
+        by_text = estimate_tokens(text)
+        by_bytes = estimate_tokens_from_bytes(len(text.encode()))
+        assert 1 / 1.2 <= by_bytes / by_text <= 1.2, text[:20]
+    ascii_only = "plain ascii prose, " * 300
+    assert estimate_tokens(ascii_only) == estimate_tokens_from_bytes(len(ascii_only.encode()))
+
+
+def test_estimating_nothing_costs_nothing():
+    assert estimate_tokens("") == 0.0
+    assert estimate_tokens_from_bytes(0) == 0.0
+    assert estimate_tokens_from_bytes(-5) == 0.0  # a bad count must not subtract from a window
 
 
 def test_chunk_text_boundaries_and_overlap():
