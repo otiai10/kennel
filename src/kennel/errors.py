@@ -59,6 +59,18 @@ class PermissionDeniedError(KennelError):
     """A tool needed a permission that was not granted."""
 
 
+class HookError(KennelError):
+    """A hook raised, so the work it was guarding failed.
+
+    Hooks are intervention, not observation: a broken policy is an error, not an
+    absence of policy (principle 3). ``before_tool`` / ``after_tool`` express that by
+    failing the tool call; a ``before_prompt`` hook has no tool call to fail, so the
+    turn fails instead and its exception arrives here — as a :class:`KennelError` with
+    a message rather than a traceback, which is what lets the CLI stay in its prompt
+    loop. The hook's own exception is the ``__cause__``.
+    """
+
+
 class WorkspaceError(KennelError):
     """Workspace configuration or path error."""
 
