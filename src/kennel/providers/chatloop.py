@@ -15,11 +15,11 @@ Design notes:
   ``respond_structured`` are three thin wrappers around one loop, which is what
   makes ``respond()`` and ``"".join(stream())`` return the same text -- including
   any narration the model emits before a tool call.
-* **The loop always stops.** The per-turn tool budget lives in ``ToolRunner``
-  (principle 2), so the loop reads it rather than keeping a second budget of its
-  own; see :func:`_limit_reached`. Once the budget is spent, one more request is
-  allowed (the model usually answers from what it has) and a further tool request
-  ends the turn.
+* **The loop always stops.** When tool calls run out lives in ``ToolRunner``
+  (principle 2) -- the per-turn budget, or a model wedged repeating one call -- so the
+  loop reads that one question rather than keeping a second copy of either rule; see
+  :func:`_limit_reached`. Once they have run out, one more request is allowed (the model
+  usually answers from what it has) and a further tool request ends the turn.
 * **Nothing reaches a tool except through** ``invoke``, so malformed tool
   arguments are answered with an error message instead of a guessed ``{}``.
 """
@@ -143,17 +143,21 @@ def tool_to_openai(tool: Tool) -> dict[str, Any]:
 
 
 def _limit_reached(invoke: ToolInvoker) -> bool:
-    """Has the tool runner behind ``invoke`` spent its per-turn budget?
+    """Should the next request be the last one -- has the tool runner behind ``invoke``
+    run out of tool calls for this turn?
 
     ``ModelProvider.create_session`` hands a provider a bare callable, so the loop
     asks the object that callable is bound to: with Kennel's own invoker that is
-    ``ToolRunner.invoke``, whose ``ToolRunner`` publishes ``limit_hit`` as a flag.
-    A callable ``limit_hit`` is called instead, so an invoker that computes it works
-    too. Any other invoker -- a plain function, a test double -- has no ``__self__``
-    carrying the attribute and therefore always reads ``False``, meaning "no budget
-    to spend": pass ``limit_hit=`` to :class:`ChatLoopSession` to supply one.
+    ``ToolRunner.invoke``, whose ``ToolRunner`` publishes ``no_more_tool_rounds`` -- the
+    per-turn budget being spent, or the model being wedged on one repeated call, which the
+    loop handles the same way. An invoker that publishes only the older budget flag
+    ``limit_hit`` still works, and either may be a callable that computes it. Any other
+    invoker -- a plain function, a test double -- has no ``__self__`` carrying either
+    attribute and therefore always reads ``False``, meaning "nothing to run out of":
+    pass ``limit_hit=`` to :class:`ChatLoopSession` to supply one.
     """
-    limit = getattr(getattr(invoke, "__self__", None), "limit_hit", False)
+    owner = getattr(invoke, "__self__", None)
+    limit = getattr(owner, "no_more_tool_rounds", getattr(owner, "limit_hit", False))
     return bool(limit() if callable(limit) else limit)
 
 
@@ -250,10 +254,18 @@ class ChatLoopSession(ProviderSession):
                 self.messages.append(ChatMessage("assistant", text))
                 return
             if last_round:
-                # The tool budget is spent and the model is still asking. Stop here, and
+                # Tool calls have run out and the model is still asking. Stop here, and
                 # leave the request out of the conversation: a stored assistant message
                 # whose tool calls have no replies is not a conversation a model can be
-                # asked to continue. Session.run reports this as stop_reason "tool_limit".
+                # asked to continue. Session.run reports a spent budget as stop_reason
+                # "tool_limit"; a turn stopped by the repeated-call guardrail ends as
+                # "end_turn", with the guardrail's own records in the trace.
+                # What this does not cover: a model that asks for tools in this last round
+                # too leaves the turn with no answer text at all (and, under
+                # respond_structured, with a ProviderError from parsing ""). That predates
+                # issue #58 on the budget path; closing it means deciding what stop_reason
+                # says about an answerless turn, which docs/output-format.md fixes as an
+                # external contract.
                 return
             self.messages.append(ChatMessage("assistant", text or None, tool_calls=requested))
             for call in requested:

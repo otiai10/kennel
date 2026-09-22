@@ -26,6 +26,7 @@ from kennel.providers.chatloop import (
     tool_to_openai,
 )
 from kennel.registry import builtin_registry
+from kennel.runner import REPEATED_CALL_REFUSAL, TOOLS_STOPPED_NOTICE
 from kennel.tools.base import Tool
 
 
@@ -311,6 +312,63 @@ async def test_an_explicit_limit_hit_callable_wins():
     )
     assert await session.respond("go") == ""  # the extra round asked for tools again
     assert len(transport.calls) == 3 and len(recorder.calls) == 2
+
+
+# -- issue #58: a model wedged on one repeated call does not spend the turn -------------
+
+
+def repeated_rounds(count: int, arguments: str = '{"path": "notes/todo.md"}') -> list:
+    """``count`` requests that all ask for the very same ``read``, the way a wedged model does."""
+    return [tool_round(f"call-{i}", "read", arguments) for i in range(count)]
+
+
+async def test_a_wedged_model_ends_the_turn_without_spending_the_budget(meeting_ws: Path):
+    """The repeated-call guardrail, not the budget, is what ends this turn (`ToolRunner`
+    refuses the third identical call and gives up on the turn at the fifth), so the answer
+    arrives after six requests instead of the thirty-four the budget would have allowed."""
+    agent, transport, provider = scripted_agent(
+        meeting_ws, [*repeated_rounds(5), text_round("Tell me which section you want.")]
+    )
+    result = await agent.run("read the notes")
+
+    assert result.stop_reason == "end_turn"  # not "tool_limit": no budget was spent
+    assert result.text == "Tell me which section you want."
+    assert [call.status for call in result.tool_calls] == ["ok", "ok", "blocked", "blocked", "blocked"]
+    assert len(transport.calls) == 6
+    assert provider.sessions[0].messages[-1].role == "assistant"
+
+
+async def test_a_withheld_result_the_model_keeps_asking_for_still_gets_an_answer(meeting_ws: Path):
+    """The shape issue #58 was reported in: the result does not fit the window (#47), the
+    model ignores the notice and sends the identical `read` again."""
+    (meeting_ws / "ja.txt").write_text(("会議の記録。" * 20 + "\n") * 100)  # ~36KB
+    agent, transport, provider = scripted_agent(
+        meeting_ws,
+        [*repeated_rounds(5, '{"path": "ja.txt"}'), text_round("どの節を読みますか。")],
+    )
+    result = await agent.run("読んで")
+
+    assert result.stop_reason == "end_turn" and result.text == "どの節を読みますか。"
+    assert [call.withheld for call in result.tool_calls] == [True, True, False, False, False]
+    handed = [m.content for m in provider.sessions[0].messages if m.role == "tool"]
+    assert handed[0].startswith("Error: the read result is")
+    assert "Do not send this same call again" in handed[0]
+    assert handed[2] == REPEATED_CALL_REFUSAL and handed[-1] == TOOLS_STOPPED_NOTICE
+    assert len(transport.calls) == 6
+
+
+async def test_a_model_that_never_stops_asking_ends_the_turn_with_no_text(meeting_ws: Path):
+    """The known hole, pinned rather than papered over: the extra request the loop allows is
+    the model's chance to answer, and a model that spends it on another tool call leaves the
+    turn with no text. That is the existing behaviour of the spent budget (which at least
+    reports `tool_limit`); deciding what `stop_reason` should say about an answerless turn
+    changes an external contract (`docs/output-format.md`) and is not this change's to make.
+    What issue #58 fixes is the cost: five calls, not thirty-two."""
+    agent, transport, _ = scripted_agent(meeting_ws, repeated_rounds(30))
+    result = await agent.run("read the notes")
+
+    assert result.text == "" and result.stop_reason == "end_turn"
+    assert len(result.tool_calls) == 5 and len(transport.calls) == 6
 
 
 async def test_close_closes_the_transport():
