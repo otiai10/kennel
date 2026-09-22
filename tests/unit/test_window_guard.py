@@ -105,6 +105,26 @@ async def test_the_model_can_come_back_with_a_range(tmp_path):
     assert [c.withheld for c in result.tool_calls] == [True, False]
 
 
+async def test_a_japanese_result_over_the_window_is_withheld_too(tmp_path):
+    """AC-2 (#53): the guard has to catch Japanese, not only latin text.
+
+    Measured on the device rather than assumed: a read result of this size reached the
+    withheld notice, while 15,642 bytes of the same text answered normally
+    (docs/architecture.md §Context). The byte estimate is script-blind, so this pins that
+    it is on the safe side for three-byte characters rather than under them.
+    """
+    line = "1. 本日の議題は次期リリースの範囲とスケジュールの確認である。\n"
+    (tmp_path / "ja.txt").write_text(line * 200)  # ~6,400 characters, ~19KB of UTF-8
+    agent, provider, events = build(tmp_path, reads=("ja.txt",))
+    result = await agent.run("読んで")
+
+    data = completed(events)[0]
+    assert data["output_bytes"] > 18_000 and data["estimated_tokens"] > 4096
+    assert data["window_exceeded"] is True and data["withheld"] is True
+    assert "議題" not in provider.sessions[0].tool_results[0]  # the text never reached the model
+    assert result.tool_calls[0].status == "ok"  # the read itself succeeded
+
+
 # -- AC-2: the output limit stays the only limit ------------------------------
 
 
