@@ -397,17 +397,20 @@ def test_interactive_ctrl_c_cancels_the_turn(meeting_ws):
                 if not chunk:
                     break
                 output += chunk
-            if not asked and b"Type /help" in output:
+            # Always wait for the prompt itself, never for the line before it: input typed
+            # before a prompt is printed is discarded (#34). Only the Ctrl-C below is meant
+            # to arrive mid-turn.
+            if not asked and output.endswith(b"> "):
                 os.write(fd, b"slow question\n")
                 asked = True
             elif asked and not interrupted and b"slow question" in output:
                 time.sleep(0.5)  # let the turn reach the sleeping provider call
                 os.write(fd, b"\x03")  # Ctrl-C: SIGINT to the foreground process group
                 interrupted = True
-            elif interrupted and not asked_again and b"(cancelled)" in output:
+            elif interrupted and not asked_again and b"(cancelled)" in output and output.endswith(b"> "):
                 os.write(fd, b"second question\n")
                 asked_again = True
-            elif asked_again and not quit_sent and b"after cancel" in output:
+            elif asked_again and not quit_sent and b"after cancel" in output and output.endswith(b"> "):
                 os.write(fd, b"/exit\n")
                 quit_sent = True
             if os.waitpid(pid, os.WNOHANG)[1]:
