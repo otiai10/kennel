@@ -17,12 +17,21 @@ if TYPE_CHECKING:
     from .providers.base import ProviderSession
 
 
-# Token estimation constants. The on-device model gives us no token counter, so
-# usage is estimated from text. Measured against Apple's tokenizer on English and
-# Japanese samples: latin script runs about four characters per token, CJK about
-# two. Tool output is only kept as a UTF-8 byte count, so it is divided by four.
+# Token estimation constants. The on-device model exposes no tokenizer and no token
+# counter, so the only way to calibrate these is to find the size at which a result
+# stops fitting the declared window. Done that way on macOS 27 with the on-device model
+# (4,096 tokens, see docs/architecture.md §Context for the sizes): latin script runs
+# about four characters per token, and Japanese no denser than one and a half — a read
+# result of 4,668 CJK characters still answered, which rules out one character per token.
+#
+# Tool output reaches the estimate as a UTF-8 byte count alone (``ToolCallRecord``
+# keeps the size, not the text), and four bytes per token is on the safe side of that
+# same measurement for CJK: three bytes per character over 1.5 characters per token is
+# 4.5 bytes per token, so the byte figure over-counts Japanese slightly rather than
+# under-counting it. Keeping the two within ~1.13x of each other is the point; making
+# the byte figure script-aware would need the text the record does not keep (#53).
 CHARS_PER_TOKEN = 4.0
-CJK_CHARS_PER_TOKEN = 2.0
+CJK_CHARS_PER_TOKEN = 1.5
 BYTES_PER_TOKEN = 4.0
 
 _CJK = re.compile(
@@ -34,7 +43,9 @@ def estimate_tokens(text: str) -> float:
     """Estimate how many tokens ``text`` costs, counting CJK characters as denser.
 
     Deliberately cheap and approximate: it exists so a 4k window can be shown as
-    a percentage, not to predict the tokenizer exactly.
+    a percentage, not to predict the tokenizer exactly. Approximate in the safe
+    direction, though — the coefficients are the densest the on-device measurement
+    allows, so a Japanese conversation is not shown as roomier than it is.
     """
     if not text:
         return 0.0
@@ -43,7 +54,11 @@ def estimate_tokens(text: str) -> float:
 
 
 def estimate_tokens_from_bytes(size: int) -> float:
-    """Estimate tokens for text we only kept the UTF-8 byte length of."""
+    """Estimate tokens for text we only kept the UTF-8 byte length of.
+
+    Script-blind, which is why :data:`BYTES_PER_TOKEN` is set on the safe side for
+    multi-byte text rather than to match :func:`estimate_tokens` exactly.
+    """
     return max(0, size) / BYTES_PER_TOKEN
 
 
