@@ -24,6 +24,7 @@ from ..registry import DEFAULT_TOOLS
 from ..session import AgentResult, Session
 from .output import FORMATS, DocumentOutput, JsonOutput, MachineOutput
 from .renderer import ConsolePrompter, Renderer
+from .terminal import discard_typed_ahead
 
 PROMPT = "> "
 
@@ -531,6 +532,10 @@ def _build_commands(
 def run_interactive(agent: Agent, renderer: Renderer, prompter: ConsolePrompter | None) -> int:
     # Deliberately no readline: with libedit, Ctrl-C at the prompt is only acted on at the
     # next Enter and queued input can be dropped. Cooked-mode input() keeps Ctrl-C predictable.
+    # For the same reason the prompt owns the tty queue: anything typed while the agent was
+    # busy is discarded just before each prompt is printed (#34). Those characters stay on
+    # screen because the terminal echoed them at keypress time and we never touch ECHO --
+    # a terminal mode we changed is a terminal mode a hard crash can leave broken.
     out = renderer.out
     out.write(_header(agent) + "\n\n")
     out.flush()
@@ -540,6 +545,7 @@ def run_interactive(agent: Agent, renderer: Renderer, prompter: ConsolePrompter 
     last_interrupt = 0.0
     try:
         while True:
+            discard_typed_ahead()  # anything typed while the agent was busy is not this turn
             try:
                 line = input(PROMPT)
             except EOFError:

@@ -397,17 +397,20 @@ def test_interactive_ctrl_c_cancels_the_turn(meeting_ws):
                 if not chunk:
                     break
                 output += chunk
-            if not asked and b"Type /help" in output:
+            # Always wait for the prompt itself, never for the line before it: input typed
+            # before a prompt is printed is discarded (#34). Only the Ctrl-C below is meant
+            # to arrive mid-turn.
+            if not asked and output.endswith(b"> "):
                 os.write(fd, b"slow question\n")
                 asked = True
             elif asked and not interrupted and b"slow question" in output:
                 time.sleep(0.5)  # let the turn reach the sleeping provider call
                 os.write(fd, b"\x03")  # Ctrl-C: SIGINT to the foreground process group
                 interrupted = True
-            elif interrupted and not asked_again and b"(cancelled)" in output:
+            elif interrupted and not asked_again and b"(cancelled)" in output and output.endswith(b"> "):
                 os.write(fd, b"second question\n")
                 asked_again = True
-            elif asked_again and not quit_sent and b"after cancel" in output:
+            elif asked_again and not quit_sent and b"after cancel" in output and output.endswith(b"> "):
                 os.write(fd, b"/exit\n")
                 quit_sent = True
             if os.waitpid(pid, os.WNOHANG)[1]:
@@ -440,3 +443,141 @@ def test_usage_command_reports_the_context_window(meeting_ws):
     assert after > before  # the turn and its tool output now sit in the window
     assert "turns: 0\ncompactions: 0" in blocks[1] and "turns: 1\ncompactions: 0" in blocks[2]
     assert "context: " in out.split("session_id: ")[-1]  # /status carries a context line
+
+
+def _drive_pty(ws: Path, script, steps, timeout=60.0) -> str:
+    """Run the interactive CLI under a pty and play *steps* against its output.
+
+    Each step is ``(predicate, payload)``: once ``predicate(output_so_far)`` holds, the
+    payload is delivered once -- bytes are written to the tty, a callable is handed the fd
+    so it can time its own keystrokes. Reading continues until the child exits or *timeout*.
+    """
+    import pty
+    import select
+    import time
+
+    env = {**os.environ, "NO_COLOR": "1", "KENNEL_MOCK_SCRIPT": json.dumps(script)}
+    pid, fd = pty.fork()
+    if pid == 0:  # child
+        os.chdir(ws)
+        os.execvpe(sys.executable, [sys.executable, "-m", "kennel.cli.main", ".", "--provider", "mock"], env)
+    output = b""
+    pending = list(steps)
+    deadline = time.time() + timeout
+    try:
+        while time.time() < deadline:
+            ready, _, _ = select.select([fd], [], [], 0.2)
+            if ready:
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output += chunk
+            if pending and pending[0][0](output):
+                _, payload = pending.pop(0)
+                if callable(payload):
+                    payload(fd)
+                else:
+                    os.write(fd, payload)
+            if os.waitpid(pid, os.WNOHANG)[1]:
+                break
+    finally:
+        os.close(fd)
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+    assert not pending, f"never reached step {len(steps) - len(pending)}:\n{output.decode(errors='replace')}"
+    return output.decode(errors="replace")
+
+
+@pytest.mark.skipif(not hasattr(os, "openpty"), reason="pty needed")
+def test_interactive_discards_input_typed_during_a_turn(meeting_ws):
+    """Enters and a half-typed line entered mid-turn never become the next turn."""
+    import time
+
+    def type_ahead(fd):
+        time.sleep(0.5)  # the turn is under way; three bare Enters and a partial line
+        for _ in range(3):
+            os.write(fd, b"\n")
+            time.sleep(0.15)
+        os.write(fd, b"half-typed")
+
+    script = {"turns": [[{"sleep": 3}, {"text": "answer one"}], "answer two"]}
+    text = _drive_pty(
+        meeting_ws,
+        script,
+        [
+            (lambda o: o.endswith(b"> "), b"first question\n"),
+            (lambda o: b"first question" in o, type_ahead),
+            (lambda o: b"answer one" in o and o.endswith(b"> "), b"/status\n"),
+            (lambda o: b"permission_mode:" in o and o.endswith(b"> "), b"/exit\n"),
+        ],
+    )
+    # One prompt after the turn, not one per swallowed Enter: input() writes the prompt
+    # without a newline, so stacked prompts show up as "> > " on a single line.
+    assert "> > " not in text, text
+    assert text.count("answer one") == 1, text
+    # "/status" arrived on its own line: had "half-typed" survived, "half-typed/status"
+    # would have been a prompt, not a command, and the mock would have answered it.
+    assert "permission_mode:" in text, text
+    assert "answer two" not in text, text
+    assert "Traceback" not in text, text
+
+
+@pytest.mark.skipif(not hasattr(os, "openpty"), reason="pty needed")
+def test_typed_ahead_does_not_answer_the_permission_prompt(meeting_ws):
+    """A "y" typed before the Allow prompt appears must not approve the write."""
+    import time
+
+    def type_ahead_yes(fd):
+        time.sleep(0.8)  # well before the prompt: the turn sleeps for 3 seconds first
+        os.write(fd, b"y\n")
+
+    script = {
+        "turns": [
+            [{"sleep": 3}, {"tool": "write", "arguments": {"path": "note.txt", "content": "by the mock"}}, {"text": "wrote the file"}],
+            "second answer",
+        ]
+    }
+    text = _drive_pty(
+        meeting_ws,
+        script,
+        [
+            (lambda o: o.endswith(b"> "), b"please write the note\n"),
+            (lambda o: b"please write the note" in o, type_ahead_yes),
+            (lambda o: b"[y] once" in o, b"n\n"),  # the answer the user actually saw
+            (lambda o: b"wrote the file" in o and o.endswith(b"> "), b"/exit\n"),
+        ],
+    )
+    assert "[y] once" in text, text
+    assert "⊘ denied: Write note.txt" in text, text
+    assert not (meeting_ws / "note.txt").exists(), text
+    assert "Traceback" not in text, text
+
+
+def test_discard_typed_ahead_is_a_noop_without_a_tty(meeting_ws):
+    """Off a tty the helper touches nothing, so piped stdin keeps working."""
+    import io
+
+    from kennel.cli.terminal import discard_typed_ahead
+
+    queued = io.StringIO("queued\n")
+    discard_typed_ahead(queued)
+    assert queued.read() == "queued\n"  # a StringIO is not a tty: left alone
+
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd) as pipe, os.fdopen(write_fd, "w") as sink:
+        sink.write("piped\n")
+        discard_typed_ahead(pipe)  # a real fd, but not a terminal
+
+    closed = io.StringIO()
+    closed.close()
+    discard_typed_ahead(closed)
+    discard_typed_ahead()  # under pytest stdin is not a tty either
+
+    p = run_cli([], meeting_ws, script={"turns": ["only answer"]}, stdin="hello\n/exit\n")
+    assert p.returncode == 0, p.stderr
+    assert "only answer" in p.stdout and "Traceback" not in p.stderr
