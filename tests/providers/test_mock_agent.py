@@ -287,6 +287,7 @@ async def test_multi_turn_session_and_clear(meeting_ws):
     await session.run("b")
     assert [t.response for t in session.history] == ["one", "two"] and len(provider.sessions) == 1
     assert session.status()["turns"] == 2 and session.status()["mode"] == "local"
+    assert session.status()["provider"] == "mock"  # AC-1 (#59): ProviderInfo.name, not model
     await session.clear()
     assert session.history == [] and provider.sessions[0].closed
     await session.run("c")

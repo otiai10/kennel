@@ -201,7 +201,11 @@ def test_interactive_session(meeting_ws):
     assert p.returncode == 0, p.stderr
     out = p.stdout
     assert out.startswith("Kennel v0.1.0\nworkspace: ")
-    assert "model: MockModel\nmode: local\npermissions: default\ntools: glob, grep, read, write (ask), edit (ask), shell (ask)" in out
+    assert (
+        "provider: mock\nmodel: MockModel\nmode: local\npermissions: default\n"
+        "tools: glob, grep, read, write (ask), edit (ask), shell (ask)"
+    ) in out  # AC-2 (#59): the header line
+    assert "compactions: 0\nprovider: mock\nmodel: MockModel\n" in out  # AC-1 (#59): /status too
     assert "/clear" in out and "forget the conversation" in out
     assert "/compact" in out and "/permissions" in out  # new commands are documented
     assert "turns: 0" in out and "permissions: edit=ask" in out

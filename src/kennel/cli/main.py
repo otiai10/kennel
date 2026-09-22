@@ -437,6 +437,7 @@ def _header(agent: Agent) -> str:
     lines = [
         f"Kennel v{__version__}",
         f"workspace: {agent.workspace.root}",
+        f"provider: {info.name}",
         f"model: {info.model}",
         f"mode: {info.mode}",
         f"permissions: {agent.permission_mode.value}" + (f" ({rules})" if rules else ""),
