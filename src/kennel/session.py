@@ -171,24 +171,33 @@ class Session:
         return f"{self.agent.instructions}\n\n{extra_instructions}"
 
     def _reset_window(self, instructions: str) -> None:
-        """Point the estimated-window bookkeeping at what a fresh provider session holds.
+        """Point the estimated-window bookkeeping at what the live provider session holds.
 
-        ``instructions`` is the full text that session was (or will be) opened with —
-        already composed by :meth:`_compose_instructions`, not re-derived here, so
-        callers that already built it for :meth:`create_session` do not pay for it twice.
+        ``instructions`` is the full text that session was opened with — already
+        composed by :meth:`_compose_instructions`, not re-derived here, so
+        :meth:`_provider` does not pay for it twice.
 
-        Called whenever the live provider session restarts — a new one in
-        :meth:`_provider`, or the summary session :meth:`compact` is about to open —
-        so :meth:`context_usage` reflects that session's instructions plus whatever
-        turns follow, not the history from before the restart (#45: without this,
-        `compact()` freed the provider session but a caller reading `context_usage()`
-        before the next `_provider()` call — the failed-turn report, `/status` — kept
-        seeing the pre-compaction size).
+        Only :meth:`_provider` (and ``__init__``, for the fields to exist) calls this:
+        the pair is read by :meth:`_estimate_window_tokens` *while a session is live*,
+        and what a dropped session leaves behind is derived there instead of pushed
+        here (see :meth:`_drop_provider`).
         """
         self._window_instructions = instructions
         self._window_turn_start = len(self.history)
 
     async def _drop_provider(self) -> None:
+        """Retire the live provider session, if any.
+
+        Every caller — :meth:`close`, :meth:`clear`, :meth:`compact`,
+        :meth:`_abandon_turn` and ``run()``'s timeout handler — gets the same
+        estimated-window bookkeeping without doing anything extra, because
+        :meth:`_estimate_window_tokens` derives the window from whether a session is
+        live rather than each caller resetting it (#52, and #45 for the reader that
+        must not see the pre-drop size: the failed-turn report, `/status` right after
+        Ctrl-C). There is deliberately no exception: a path that wanted to keep
+        counting the retired session's history would be counting a transcript the
+        provider has already forgotten.
+        """
         session, self._provider_session = self._provider_session, None
         if session is not None:
             try:
@@ -224,10 +233,9 @@ class Session:
 
     async def clear(self) -> None:
         """Forget the conversation (keeps configuration and the session id)."""
-        await self._drop_provider()
-        self.history.clear()
+        self.history.clear()  # before dropping, so the window derives from an empty history
         self.compactions = 0
-        self._reset_window(self.agent.instructions)
+        await self._drop_provider()
 
     def status(self) -> dict[str, Any]:
         return {
@@ -300,7 +308,18 @@ class Session:
         return self._provider_session.usage() if self._provider_session is not None else None
 
     def _estimate_window_tokens(self) -> float:
-        """Estimate the tokens held by the live provider session (see :class:`ContextUsage`)."""
+        """Estimate the tokens held by the live provider session (see :class:`ContextUsage`).
+
+        With no live session, the estimate is what the *next* one will be opened with
+        instead: :meth:`_provider` is only ever called with ``_compaction_note()``, so a
+        summary of the whole history replaces it verbatim and nothing is carried over.
+        Deriving it here rather than resetting the bookkeeping in every
+        :meth:`_drop_provider` caller keeps the answer in one place (principle 2) and
+        keeps it right for ``run()``'s timeout handler, which drops the session *before*
+        appending the timed-out turn to :attr:`history` (#52).
+        """
+        if self._provider_session is None:
+            return estimate_tokens(self._compose_instructions(self._compaction_note()))
         total = estimate_tokens(self._window_instructions)
         for turn in self.history[self._window_turn_start :]:
             total += estimate_tokens(turn.prompt) + estimate_tokens(turn.response)
@@ -600,15 +619,15 @@ class Session:
         """Replace the provider session with a fresh one seeded by a compact summary of the history.
 
         Returns ``False`` (no-op, no event emitted) if there is no history to compact.
-        The estimated-window bookkeeping (:meth:`context_usage`) is reset immediately,
-        to the size of the summary rather than the history it replaces (#45) — a caller
-        that reads it right after (a failed turn's report, `/status`) before the next
-        `_provider()` call sees the post-compaction size, not the pre-compaction one.
+        Retiring the provider session is enough to move the estimated-window bookkeeping
+        (:meth:`context_usage`) to the size of the summary rather than the history it
+        replaces (#45, #52) — a caller that reads it right after (a failed turn's report,
+        `/status`) before the next `_provider()` call sees the post-compaction size, not
+        the pre-compaction one.
         """
         if not self.history:
             return False
         await self._drop_provider()
         self.compactions += 1
-        self._reset_window(self._compose_instructions(self._compaction_note()))
         self._emit(EventType.CONTEXT_COMPACTED, turns=len(self.history))
         return True
