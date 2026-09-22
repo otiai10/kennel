@@ -9,6 +9,7 @@ from typing import IO, Any
 
 from ..events import Event, EventBus, EventType, event_json
 from ..permissions import Approval, PermissionRequest
+from .terminal import discard_typed_ahead
 
 
 class Style:
@@ -190,6 +191,9 @@ class ConsolePrompter:
             lines.append(s.red(f"  ! {warning}"))
         self.out.write("\n".join(lines) + "\n")
         while True:
+            # Every ask redraws the boundary: only what is typed after this question is
+            # printed counts as its answer, re-asks included.
+            discard_typed_ahead(self.inp)
             self.out.write("  [y] once  [a] session  [n] deny > ")
             self.out.flush()
             answer = self._read_line()
