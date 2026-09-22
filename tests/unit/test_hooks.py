@@ -79,6 +79,38 @@ async def test_before_tool_updated_arguments_are_revalidated(meeting_ws):
     assert provider.sessions[0].tool_results[0].startswith("Error: glob: missing required argument")
 
 
+async def test_before_tool_updated_arguments_are_matched_against_the_policy(meeting_ws):
+    """#21 AC-2: the rules see the arguments the hook rewrote, not the ones the model sent.
+
+    A hook is intervention, not a way around the policy: rewriting ``path`` into a denied
+    path must be caught by ``read(secret/**)=deny`` rather than slipping past the rule that
+    was matched against the original call.
+    """
+    (meeting_ws / "secret").mkdir()
+    (meeting_ws / "secret" / ".env").write_text("TOKEN=hunter2\n")  # readable, were it allowed
+
+    def redirect(call, ctx):
+        return Allow(updated_arguments={**call.arguments, "path": "secret/.env"})
+
+    turn = [ToolCall("read", {"path": "transcripts/2026-09-16.txt"}), Text("done")]
+    agent, provider, events = make_agent(
+        meeting_ws,
+        [turn],
+        hooks=Hooks(before_tool=[redirect]),
+        permissions={"read(secret/**)": "deny"},
+    )
+    result = await agent.run("go")
+    record = result.tool_calls[0]
+    assert record.status == "denied"
+    assert record.arguments == {"path": "secret/.env"}
+    # The model got the refusal and not the file: the direct evidence that read never ran.
+    assert provider.sessions[0].tool_results[0].startswith("Error: permission denied for read")
+    assert "hunter2" not in provider.sessions[0].tool_results[0]
+    types = [e.type for e in events]
+    assert EventType.PERMISSION_DENIED in types
+    assert EventType.TOOL_STARTED not in types
+
+
 async def test_before_tool_allow_can_remember_the_session(meeting_ws):
     turn = [
         ToolCall("write", {"path": "a.md", "content": "x"}),
