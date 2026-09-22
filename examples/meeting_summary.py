@@ -5,9 +5,10 @@ application layers a domain schema on top of the SDK: chunking for long
 transcripts, ``Agent.run(prompt, schema=...)`` per chunk, and a structured reduce.
 
 The agent is built with ``tools=[]``: the transcript text is passed in the prompt, so
-there is nothing to look up and each chunk costs exactly one model request. Note that
-``Agent`` prepends its default instructions (a glob/read procedure) to the domain
-instructions below; replacing rather than appending them is a separate feature.
+there is nothing to look up and each chunk costs exactly one model request. ``system_prompt``
+replaces ``Agent``'s default instructions (a glob/read procedure) outright, and
+``include_workspace_overview=False`` drops the workspace listing too, so the model sees only
+the domain instructions below.
 
 Usage::
 
@@ -99,8 +100,8 @@ INSTRUCTIONS = (
 
 
 def build_agent(provider: ModelProvider | None = None, workspace: str | Path = ".") -> Agent:
-    """An extraction-only agent: no tools, the domain instructions, one request per call."""
-    return Agent(workspace, tools=[], instructions=INSTRUCTIONS, provider=provider)
+    """An extraction-only agent: no tools, only the domain instructions, one request per call."""
+    return Agent(workspace, tools=[], system_prompt=INSTRUCTIONS, include_workspace_overview=False, provider=provider)
 
 
 async def extract(agent: Agent, prompt: str) -> MeetingSummary:
