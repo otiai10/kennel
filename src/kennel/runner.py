@@ -8,6 +8,15 @@ provider's whole context window is one of those cases: it is measured, then with
 replaced by a short instruction to ask for a smaller part, because handing it over does not
 shorten the conversation, it fails the request.
 
+Adapting is what the model is asked to do, not what it can be relied on to do. When the
+same call keeps arriving after being refused as a repeat, the runner gives up on it
+(:attr:`ToolRunner.repeat_wedged`): that call will not run again this turn, and its answer
+becomes the same terminal instruction the spent budget would have given. Otherwise one
+repeated call can spend the whole per-turn budget and the user loses the turn (issue #58).
+A call that changes its arguments is still run, because narrowing the request is exactly what
+the model was asked to do -- on a provider that runs its own tool loop it is the only
+recovery there is.
+
 ``before_tool`` hooks run after validation and before the permission check, so an
 application policy can deny a call the policy would have allowed, or correct its
 arguments before anyone judges them. ``after_tool`` hooks can replace the result
@@ -38,14 +47,36 @@ from .tools.base import Tool, ToolContext, ToolResult
 
 log = logging.getLogger(__name__)
 
+#: The one thing a model can still usefully do once no further tool call will run this
+#: turn, so the per-turn budget and the repeated-call guardrail say it with the same words.
+STOP_CALLING_TOOLS = "Stop calling tools and answer with what you have."
+
 #: What the model is given in place of a result that is larger than its whole context
 #: window. Handing such a result over does not truncate the conversation, it fails the
 #: request (Apple answers status 255), so the model is told how to ask for less instead.
+#: The last sentence is there because the models that ignore this notice ignore it by
+#: sending the identical call again (issue #58): that refusal is now said up front, by the
+#: notice itself, and not only by the guardrail that answers the repeat.
 WINDOW_EXCEEDED_NOTICE = (
     "Error: the {tool} result is ~{tokens:,} tokens, larger than this model's "
     "{window:,}-token context window, so it was not added to the conversation. "
     "Ask for a smaller part: read a line range (start_line/end_line), grep for the "
-    "words you need, or work through the file section by section."
+    "words you need, or work through the file section by section. Do not send this same "
+    "call again with the same arguments: it will be refused."
+)
+
+#: The answer to an identical call that has already been made this turn.
+REPEATED_CALL_REFUSAL = (
+    "Error: this exact tool call was already made with the same arguments. Do not repeat "
+    "it; use the earlier result or change the arguments."
+)
+
+#: The answer to a call the repeated-call guardrail has given up on (see
+#: :attr:`ToolRunner.repeat_wedged`). It is the terminal instruction the model would
+#: otherwise only have received at the end of the per-turn budget.
+TOOLS_STOPPED_NOTICE = (
+    "Error: this tool call kept arriving after being refused, so it will not run again this "
+    f"turn. {STOP_CALLING_TOOLS}"
 )
 
 
@@ -76,13 +107,20 @@ class ToolRunner:
         *,
         max_tool_calls: int = 32,
         max_repeats: int = 3,
+        max_repeat_refusals: int = 3,
         hooks: Hooks | None = None,
         context_window_tokens: int | None = None,
     ) -> None:
         """``context_window_tokens`` is the provider's declared window, used to say on
         ``tool.completed`` whether a single result is already too big for it. ``None`` (the
         provider declares no window) means the question cannot be answered, not that the
-        answer is no."""
+        answer is no.
+
+        ``max_repeats`` and ``max_repeat_refusals`` count different things and are therefore
+        two numbers. ``max_repeats`` is how often the same call may appear among the last few
+        calls before it is refused instead of run; ``max_repeat_refusals`` is how many such
+        refusals **in a row** make the runner give up on that call for the rest of the turn
+        (:attr:`repeat_wedged`)."""
         self._tools = dict(tools)
         self._context = context
         self._events = events
@@ -91,6 +129,7 @@ class ToolRunner:
         self._hooks = hooks if hooks is not None else Hooks()
         self.max_tool_calls = max_tool_calls
         self.max_repeats = max_repeats
+        self.max_repeat_refusals = max_repeat_refusals
         self.context_window_tokens = context_window_tokens
         self._lock = threading.Lock()
         self.records: list[ToolCallRecord] = []
@@ -98,6 +137,8 @@ class ToolRunner:
         self._turn_calls = 0
         self._recent: deque[tuple[str, str]] = deque(maxlen=8)
         self.limit_hit = False
+        self._refusals_in_a_row = 0
+        self._given_up: set[tuple[str, str]] = set()
         self._turn_cancelled = False
 
     def begin_turn(self) -> None:
@@ -106,7 +147,36 @@ class ToolRunner:
             self._turn_calls = 0
             self._recent.clear()
             self.limit_hit = False
+            self._refusals_in_a_row = 0
+            self._given_up.clear()
             self._turn_cancelled = False
+
+    @property
+    def repeat_wedged(self) -> bool:
+        """Has the repeated-call guardrail given up on some call this turn?
+
+        Sticky for the turn, and published so a caller can tell a turn that wound down here
+        from one that spent its budget (``limit_hit``). Which call it was is in the records.
+        """
+        return bool(self._given_up)
+
+    @property
+    def no_more_tool_rounds(self) -> bool:
+        """Should a loop Kennel drives itself stop starting tool rounds this turn?
+
+        Two ways to run out — the per-turn budget (``limit_hit``) and a model wedged on one
+        repeated call (``repeat_wedged``) — but one question, because the answer is the same:
+        the next request should be the last one. ``ChatLoopSession`` reads this
+        (``chatloop._limit_reached``) so the loop keeps no second copy of either rule
+        (principle 2).
+
+        It is a question about rounds, not about single calls: a call that changes its
+        arguments is still served. That matters for a provider that runs its own tool loop
+        (Apple's SDK), which never asks this question and cannot be stopped from a tool
+        callback. There, refusing the repeated call while still answering a narrowed one is
+        the whole lever.
+        """
+        return self.limit_hit or self.repeat_wedged
 
     def cancel_turn(self) -> None:
         """Mark the current turn cancelled: in-flight calls are still recorded but emit no events."""
@@ -153,16 +223,33 @@ class ToolRunner:
             over_limit = self._turn_calls > self.max_tool_calls
             if over_limit:
                 self.limit_hit = True
+            repeated = repeats >= self.max_repeats
+            # Counted in a row, and reset by any call that is not a repeat: a model working
+            # through a long turn may repeat something twice by accident, but one that has
+            # been refused this many times running is not reading the refusal at all.
+            self._refusals_in_a_row = self._refusals_in_a_row + 1 if repeated else 0
+            if self._refusals_in_a_row >= self.max_repeat_refusals:
+                self._given_up.add(key)
+            given_up = key in self._given_up
         if over_limit:
-            msg = f"tool call limit ({self.max_tool_calls} per turn) reached"
-            self._record(ToolCallRecord(name, args, summary, "blocked", error=msg))
-            self._emit(EventType.TOOL_FAILED, tool=name, summary=summary, error=msg)
-            return "Error: the tool call limit for this turn was reached. Stop calling tools and answer with what you have."
-        if repeats >= self.max_repeats:
-            msg = "repeated identical tool call"
-            self._record(ToolCallRecord(name, args, summary, "blocked", error=msg))
-            self._emit(EventType.TOOL_FAILED, tool=name, summary=summary, error=msg)
-            return "Error: this exact tool call was already made with the same arguments. Do not repeat it; use the earlier result or change the arguments."
+            return self._blocked(
+                name, args, summary,
+                f"tool call limit ({self.max_tool_calls} per turn) reached",
+                f"Error: the tool call limit for this turn was reached. {STOP_CALLING_TOOLS}",
+            )
+        if given_up:
+            # Checked before the repeat itself so this call's answer stays terminal for the
+            # rest of the turn (issue #58: without this the turn runs until the budget is
+            # spent, and the user loses it).
+            return self._blocked(
+                name, args, summary,
+                f"refused {self.max_repeat_refusals} times in a row; not run again this turn",
+                TOOLS_STOPPED_NOTICE,
+            )
+        if repeated:
+            return self._blocked(
+                name, args, summary, "repeated identical tool call", REPEATED_CALL_REFUSAL
+            )
 
         hook_context: HookContext | None = None
         if self._hooks.before_tool:
@@ -295,6 +382,12 @@ class ToolRunner:
             if replaced is not None:
                 result = replaced
         return result
+
+    def _blocked(self, name: str, args: dict[str, Any], summary: str, reason: str, answer: str) -> str:
+        """Record a call a guardrail did not let run, and give the model ``answer`` instead."""
+        self._record(ToolCallRecord(name, args, summary, "blocked", error=reason))
+        self._emit(EventType.TOOL_FAILED, tool=name, summary=summary, error=reason)
+        return answer
 
     def _invalid(self, name: str, args: dict[str, Any], summary: str, exc: ToolArgumentError) -> str:
         """Record and report arguments that did not validate (raw, or rewritten by a hook)."""
