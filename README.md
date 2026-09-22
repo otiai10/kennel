@@ -11,8 +11,10 @@ $ kennel ~/meetings
 
 Kennel v0.1.0
 workspace: /Users/me/meetings
+provider: apple
 model: Apple SystemLanguageModel
 mode: local
+permissions: default
 tools: glob, grep, read, write (ask), edit (ask), shell (ask)
 
 > 最新の会議文字起こしを探して、決定事項とTODOをまとめて

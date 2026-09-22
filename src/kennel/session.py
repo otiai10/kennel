@@ -243,6 +243,7 @@ class Session:
             "turns": len(self.history),
             "tool_calls": len(self.runner.records),
             "compactions": self.compactions,
+            "provider": self.agent.provider.info.name,
             "model": self.agent.provider.info.model,
             "mode": self.agent.provider.info.mode,
             "context": self.context_usage().summary(),
