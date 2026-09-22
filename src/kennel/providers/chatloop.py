@@ -260,11 +260,12 @@ class ChatLoopSession(ProviderSession):
                 # asked to continue. Session.run reports a spent budget as stop_reason
                 # "tool_limit"; a turn stopped by the repeated-call guardrail ends as
                 # "end_turn", with the guardrail's own records in the trace.
-                # stellar:debt(scope) a model that asks for tools in this last round too
-                # leaves the turn with no answer text at all (and, under respond_structured,
-                # with a ProviderError from parsing ""). That predates issue #58 on the
-                # budget path. upgrade: decide what stop_reason says about an answerless
-                # turn (docs/output-format.md is an external contract) and pin it there.
+                # What this does not cover: a model that asks for tools in this last round
+                # too leaves the turn with no answer text at all (and, under
+                # respond_structured, with a ProviderError from parsing ""). That predates
+                # issue #58 on the budget path; closing it means deciding what stop_reason
+                # says about an answerless turn, which docs/output-format.md fixes as an
+                # external contract.
                 return
             self.messages.append(ChatMessage("assistant", text or None, tool_calls=requested))
             for call in requested:
