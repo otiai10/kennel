@@ -1,6 +1,7 @@
 """Agent/Session behaviour, driven deterministically by MockProvider."""
 
 import asyncio
+import math
 import threading
 import time
 from pathlib import Path
@@ -17,12 +18,14 @@ from kennel import (
     MockProvider,
     PermissionKind,
     ProviderError,
+    Session,
     Tool,
     ToolParameter,
     ToolResult,
     TurnCancelledError,
     Usage,
 )
+from kennel.context import estimate_tokens
 from kennel.providers.mock import Raise, Sleep, Text, ToolCall
 
 
@@ -713,27 +716,120 @@ async def test_clear_resets_context_usage(meeting_ws):
     await session.close()
 
 
+def dropped_window_estimate(session: Session) -> int:
+    """What context_usage() must report while no provider session is live (#52).
+
+    The next session is only ever opened by ``_provider(self._compaction_note())``, so this
+    is the whole of what it will hold: instructions plus a summary of the history, and no
+    turn counted verbatim on top.
+    """
+    return math.ceil(estimate_tokens(session._compose_instructions(session._compaction_note())))
+
+
+def overflowing_read(meeting_ws: Path) -> list:
+    """A turn whose two sub-window reads together overflow the 4096-token window.
+
+    Neither read is withheld on its own (#47), so the overflow comes from them stacking up
+    in the provider session — which is what a drop has to stop counting.
+    """
+    (meeting_ws / "big.txt").write_text("x" * 12000)
+    return [ToolCall("read", {"path": "big.txt"}), ToolCall("read", {"path": "big.txt"}), Text("read it")]
+
+
+async def loaded_session(meeting_ws: Path, *later_turns, **kw) -> Session:
+    """A session whose live window is already over the limit, plus ``later_turns`` queued."""
+    agent, _, _ = make_agent(meeting_ws, [overflowing_read(meeting_ws), *later_turns], tools=["read", SlowTool()], **kw)
+    session = agent.new_session()
+    await session.run("read the big file twice")
+    usage = session.context_usage()
+    assert usage.used_tokens > usage.window_tokens  # the two reads together overflowed it
+    return session
+
+
 async def test_explicit_compact_lowers_context_usage_immediately(meeting_ws):
     """AC-1 (#45): compact() must update the estimate itself, not wait for the next
     _provider() call to open a session and only then reset the window bookkeeping.
-
-    Each read stays under the window on its own (a single result at or over the window
-    is withheld from the model and from the estimate: #47), so the overflow here comes
-    from two sub-window reads stacking up, not from either one alone.
     """
-    (meeting_ws / "big.txt").write_text("x" * 12000)
-    turns = [[ToolCall("read", {"path": "big.txt"}), ToolCall("read", {"path": "big.txt"}), Text("read it")]]
-    agent, _, _ = make_agent(meeting_ws, turns)
-    session = agent.new_session()
-    await session.run("read the big file twice")
+    session = await loaded_session(meeting_ws)
     before = session.context_usage()
-    assert before.used_tokens > before.window_tokens  # the two reads together overflowed it
     compacted = await session.compact()
     assert compacted is True
     after = session.context_usage()
     assert after.used_tokens < before.used_tokens
     assert after.used_tokens < after.window_tokens  # no next _provider() call happened yet
     await session.close()
+
+
+async def test_interrupt_lowers_context_usage_immediately(meeting_ws):
+    """AC-1 (#52): interrupt() retires the provider session, so a `/status` or context_usage()
+    read before the next turn must show what the *next* session will hold, not the tool output
+    the retired one held."""
+    session = await loaded_session(meeting_ws, [ToolCall("slow", {}), Text("never")])
+    before = session.context_usage()
+    task = asyncio.create_task(session.run("now something slow"))
+    await asyncio.sleep(0.05)
+    session.interrupt()
+    with pytest.raises(TurnCancelledError):
+        await task
+    after = session.context_usage()
+    assert after.used_tokens < before.used_tokens
+    assert after.used_tokens < after.window_tokens  # no next _provider() call happened yet
+    assert after.compactions == 0  # nothing was compacted: the counter stays compact()'s
+    await session.close()
+
+
+async def test_timeout_lowers_context_usage_immediately(meeting_ws):
+    """AC-2 (#52): the timeout handler drops the provider session *before* run() appends the
+    timed-out turn, so the estimate is derived at read time — that turn is then counted as part
+    of the summary the next session gets, not verbatim on top of it."""
+    session = await loaded_session(
+        meeting_ws, [Sleep(2), Text("late")], config=KennelConfig(turn_timeout_seconds=0.3)
+    )
+    before = session.context_usage()
+    assert (await session.run("now something slow")).stop_reason == "timeout"
+    after = session.context_usage()
+    assert after.used_tokens < before.used_tokens and after.used_tokens < after.window_tokens
+    assert after.turns == 2 and after.used_tokens == dropped_window_estimate(session)
+    await session.close()
+
+
+async def test_every_provider_drop_path_lands_on_the_same_window_estimate(meeting_ws):
+    """AC-3 (#52): the five callers of _drop_provider() — compact(), clear(), interrupt(), the
+    timeout handler and close() — share one answer with no exception, because
+    _estimate_window_tokens() derives it from "is a session live?" instead of each caller
+    resetting the bookkeeping. A path that grew its own reset would disagree here."""
+    paths: list[tuple[str, Session]] = []
+
+    session = await loaded_session(meeting_ws)
+    assert await session.compact() is True
+    paths.append(("compact", session))
+
+    session = await loaded_session(meeting_ws, [ToolCall("slow", {}), Text("never")])
+    task = asyncio.create_task(session.run("slow one"))
+    await asyncio.sleep(0.05)
+    session.interrupt()
+    with pytest.raises(TurnCancelledError):
+        await task
+    paths.append(("interrupt", session))
+
+    session = await loaded_session(meeting_ws, [Sleep(2), Text("late")], config=KennelConfig(turn_timeout_seconds=0.3))
+    assert (await session.run("slow one")).stop_reason == "timeout"
+    paths.append(("timeout", session))
+
+    session = await loaded_session(meeting_ws)
+    await session.close()
+    paths.append(("close", session))
+
+    session = await loaded_session(meeting_ws)
+    await session.clear()
+    paths.append(("clear", session))
+    # clear() drops the history too, so the shared derivation collapses to bare instructions
+    assert session.context_usage().used_tokens == math.ceil(estimate_tokens(session.agent.instructions))
+
+    for name, session in paths:
+        usage = session.context_usage()
+        assert usage.used_tokens == dropped_window_estimate(session), name
+        assert usage.used_tokens < usage.window_tokens and usage.estimated is True, name
 
 
 async def test_second_consecutive_failure_context_before_excludes_prior_tool_output(meeting_ws):
