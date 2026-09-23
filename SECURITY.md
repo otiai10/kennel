@@ -33,7 +33,15 @@ A permission mode supplies the defaults rules are layered on:
 
 `ask` requires an interactive prompter; without one (piped stdin, `--non-interactive`, an
 application that did not provide a prompter) it means `deny`. Approvals are per call or per
-session and are never persisted.
+session and are never persisted — not even in a saved conversation: a resumed session asks
+again.
+
+**Saved conversations.** With `--persist` / `"sessions": {"persist": true}` (off by default)
+or an SDK `session_store`, the text of every prompt and answer is written in plain text to
+`<state dir>/transcripts/…/<session_id>.jsonl` (`0600`, in `0700` directories). That is the
+content of your documents as far as it reached the conversation, so treat those files like
+the documents themselves; tool arguments, command lines and tool output are not saved.
+`/clear` deletes the file.
 
 `--permission-mode bypass` turns off every prompt, `shell`, `web` and `fetch` included. It exists for
 non-interactive runs where the caller has accepted that risk; the CLI prints a warning line

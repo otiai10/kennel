@@ -52,6 +52,7 @@ from .runner import ToolCallRecord
 from .search import SearchProvider, SearchProviderInfo, SearchResult, SearchSpec
 from .search import register as register_search_provider
 from .session import AgentResult, ContextUsage, Session
+from .sessions import FileSessionStore, SessionStore
 from .tools.base import Tool, ToolContext, ToolLimits, ToolParameter, ToolResult
 from .workspace import Workspace
 
@@ -71,6 +72,7 @@ __all__ = [
     "Event",
     "EventBus",
     "EventType",
+    "FileSessionStore",
     "HookContext",
     "HookError",
     "JsonlEventLog",
@@ -100,6 +102,7 @@ __all__ = [
     "Secret",
     "Session",
     "SessionError",
+    "SessionStore",
     "Tool",
     "ToolArgumentError",
     "ToolCallRecord",

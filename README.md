@@ -131,11 +131,42 @@ kennel -p "Read the README and explain this project"   # one-shot
 | `--verbose` | add tool timings and diagnostic logging (result sizes are shown anyway) |
 | `--trace` | write every agent event as JSON lines to stderr |
 | `--no-log` | do not keep this session's event log (= `"logging": {"events": false}`) |
+| `--persist` / `--no-persist` | save this conversation so it can be resumed, or not, whatever the config says (= `"sessions": {"persist": true}`; off by default) |
+| `--continue` | resume the most recently saved conversation of this workspace |
+| `--resume ID` | resume the saved conversation `ID` of this workspace |
 
 Interactive commands: `/help`, `/status`, `/usage`, `/clear`, `/compact`, `/permissions [<tool>
 allow|ask|deny]`, `/exit`. `/status` includes the path of this session's event
-log. `Ctrl-C` cancels the current answer via `Session.interrupt()` and
+log and whether the session was resumed. `Ctrl-C` cancels the current answer via `Session.interrupt()` and
 returns to the prompt (twice at the prompt exits); `Ctrl-D` exits.
+
+### Resuming a conversation
+
+Saving conversations is **off by default**: a saved conversation keeps the text of your
+prompts and of the answers on disk. Turn it on once with `"sessions": {"persist": true}` in
+`~/.config/kennel/settings.json` (or `./kennel.json`), or per run with `--persist`;
+`--no-persist` wins over the config. One-shot runs (`-p`) are saved the same way as
+interactive ones.
+
+```bash
+kennel --persist ~/meetings          # talk, then /exit
+kennel --continue ~/meetings         # the most recent saved conversation of this workspace
+kennel --resume 06c84876ce05 ~/meetings   # a given one (the session_id from /status or the JSON result)
+```
+
+A saved conversation lives in `<state dir>/transcripts/<workspace hash>/<session_id>.jsonl`
+(the state dir is the one the event log uses: `KENNEL_STATE_DIR`, else
+`$XDG_STATE_HOME/kennel`, else `~/.local/state/kennel`), in a `0700` directory as a `0600`
+file. Each line is one turn: the prompt, the answer, why it stopped and, for each tool call,
+only the tool's name and outcome — never its arguments, command line or output.
+`--continue` and `--resume` only look at the conversations of the workspace you open, and
+they read a saved conversation even when saving is off (the resumed turns are then not
+written back). A session that is open in one `kennel` cannot be opened in a second one.
+
+The model does not get the old session back — Apple's session cannot be saved — but a
+summary of the saved turns, the same one `/compact` builds. "Allow for this session"
+approvals are not saved: a resumed session asks again. `/clear` deletes the saved
+conversation (keeping the id; the next turn starts a new file), and says so if it could not.
 
 The on-device model's context window is about 4k tokens, which is the tightest constraint in
 practice, so every tool result is reported with what it costs and every answer ends with how
@@ -245,6 +276,23 @@ session = agent.new_session()
 await session.run("Summarize transcripts/2026-09-16.txt")
 await session.run("Now only the TODOs")
 ```
+
+To keep a conversation across processes, give the agent a store; `new_session(session_id=...)`
+then reads that conversation back (`session.resumed` says whether it found one). Without a
+store nothing is saved:
+
+```python
+from kennel import Agent, FileSessionStore
+
+agent = Agent("~/meetings", session_store=FileSessionStore("~/meetings"))
+session = agent.new_session()                       # every turn is appended as it lands
+...
+later = agent.new_session(session_id=session.id)    # another process, the next day
+```
+
+`FileSessionStore` is one implementation of the `SessionStore` protocol (`append`, `load`,
+`latest`, `clear`, `lock`) — see [Resuming a conversation](#resuming-a-conversation) for what
+it keeps and where.
 
 To follow a turn as it happens, iterate it instead. `Session.stream()` yields the session's
 events on *your* event loop — including the ones a provider fires from a worker thread — so
@@ -779,6 +827,7 @@ approved from the prompt, planned for a later version). All keys are optional.
   "search_providers": { "searxng": { "url": "http://localhost:8888" } },
   "permission_mode": "default",
   "logging": { "events": true },
+  "sessions": { "persist": false },
   "permissions": {
     "write": "ask",
     "write(docs/**)": "allow",
@@ -866,7 +915,8 @@ process), and the observability work that fills out this release: a per-session 
 log, tool result sizes and remaining context shown without `--verbose`, failed turns kept in
 the history with the facts of the failure, and a tool result too big for the window withheld
 instead of failing the turn, and opt-in web search through SearXNG or Brave. Not yet:
-fetching a web page's contents, persistent sessions, MCP,
+fetching a web page's contents, forking, listing or naming saved sessions (resuming one is
+in: `--continue` / `--resume`), MCP,
 subagents, sandboxed shell. Design principles live in
 [docs/constitution.md](docs/constitution.md); the comparison with Claude Code that drove the
 current roadmap is in `docs/history/`.

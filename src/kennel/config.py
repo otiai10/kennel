@@ -15,6 +15,7 @@ permission rules approved from the prompt) with the standard library alone::
       },
       "permission_mode": "default",
       "logging": { "events": true },
+      "sessions": { "persist": false },
       "permissions": { "write": "ask", "shell": "ask", "shell(git *)": "allow" },
       "provider": "apple",
       "providers": { "apple": { "deterministic": false } },
@@ -70,6 +71,9 @@ class KennelConfig:
     #: Keep a session event log under the state directory. ``None`` means "not configured":
     #: the CLI turns it on, an embedding application opts in (see ``kennel.events``).
     log_events: bool | None = None
+    #: Save conversations so ``kennel --continue`` / ``--resume`` can pick them up. Read by the
+    #: CLI, which then passes a ``FileSessionStore``; the SDK saves only when given a store.
+    persist_sessions: bool = False
     permission_mode: str | None = None
     permissions: dict[str, str] = field(default_factory=dict)
     provider: str = DEFAULT_PROVIDER
@@ -193,6 +197,13 @@ def apply_config(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>"
         if not isinstance(logging_section["events"], bool):
             raise ConfigurationError(f"{source}: logging.events must be true or false")
         cfg.log_events = logging_section["events"]
+    sessions_section = data.get("sessions", {})
+    if not isinstance(sessions_section, dict):
+        raise ConfigurationError(f"{source}: 'sessions' must be an object")
+    if "persist" in sessions_section:
+        if not isinstance(sessions_section["persist"], bool):
+            raise ConfigurationError(f"{source}: sessions.persist must be true or false")
+        cfg.persist_sessions = sessions_section["persist"]
     if "system_prompt" in agent:
         if not isinstance(agent["system_prompt"], str):
             raise ConfigurationError(f"{source}: agent.system_prompt must be a string")
