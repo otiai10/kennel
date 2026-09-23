@@ -383,8 +383,6 @@ class FetchTool(Tool):
                 max_bytes=self.max_bytes,
                 thread_name="kennel-fetch-http",
             )
-        except ToolExecutionError:
-            raise
         except ResponseTooLarge:
             raise ToolExecutionError(f"{target.host} sent more than {self.max_bytes} bytes; Kennel stopped reading") from None
         except TimeoutError:
