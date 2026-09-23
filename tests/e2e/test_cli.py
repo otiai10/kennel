@@ -630,3 +630,66 @@ def test_discard_typed_ahead_is_a_noop_without_a_tty(meeting_ws):
     p = run_cli([], meeting_ws, script={"turns": ["only answer"]}, stdin="hello\n/exit\n")
     assert p.returncode == 0, p.stderr
     assert "only answer" in p.stdout and "Traceback" not in p.stderr
+
+
+# -- web search (issue #61) -----------------------------------------------------------
+
+WEB_FLOW = {"turns": [[{"tool": "web", "arguments": {"query": "kennel release"}}, {"text": "found it"}]]}
+HIT = {"results": [{"title": "Kennel release notes", "url": "https://kennel.example/r", "content": "v0.1 shipped"}]}
+
+
+def _searxng_config(ws: Path, url: str) -> None:
+    (ws / "kennel.json").write_text(json.dumps({"search_provider": "searxng", "search_providers": {"searxng": {"url": url}}}))
+
+
+def test_allow_web_searches_through_the_configured_service(meeting_ws, search_server):
+    """AC-1 through the CLI: bypass runs the search; the answer is built from its result."""
+    search_server.reply(200, HIT)
+    _searxng_config(meeting_ws, search_server.url)
+    p = run_cli(["-p", "x", "--allow-web", "--permission-mode", "bypass"], meeting_ws, script=WEB_FLOW)
+    assert p.returncode == 0, p.stderr
+    assert "● WebSearch 'kennel release'" in p.stdout and "found it" in p.stdout
+    assert search_server.requests[0][0] == "/search?q=kennel+release&format=json"
+
+
+def test_allow_web_asks_before_searching(meeting_ws, search_server):
+    """AC-4: --allow-web means ask; without a terminal to ask on, the search is denied, not sent."""
+    _searxng_config(meeting_ws, search_server.url)
+    p = run_cli(["-p", "x", "--allow-web"], meeting_ws, script=WEB_FLOW)
+    assert p.returncode == 0, p.stderr
+    assert "⊘ denied: WebSearch 'kennel release'" in p.stdout
+    assert not search_server.requests
+
+
+def test_without_allow_web_there_is_no_web_tool(meeting_ws, search_server):
+    """AC-4: a configured search provider alone enables nothing."""
+    _searxng_config(meeting_ws, search_server.url)
+    p = run_cli(["-p", "x", "--permission-mode", "bypass"], meeting_ws, script=WEB_FLOW)
+    assert p.returncode == 0 and "unknown tool 'web'" in p.stdout
+    assert not search_server.requests
+
+
+def _readme_block(after: str) -> list[str]:
+    """The lines of the first ```text block that follows ``after`` in the README."""
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    rest = readme[readme.index(after) :]
+    block = rest[rest.index("```text\n") + len("```text\n") :]
+    return block[: block.index("```")].splitlines()
+
+
+def test_readme_web_search_header_matches_real_output(meeting_ws):
+    """AC-12: the README's web search header sample is what the CLI prints (bar the machine-specific lines)."""
+    from kennel.cli.main import _header, build_agent, build_parser
+
+    _searxng_config(meeting_ws, "http://localhost:8888")
+    agent = build_agent(build_parser().parse_args([str(meeting_ws), "--provider", "mock", "--allow-web"]), None)
+    real = _header(agent).splitlines()
+    sample = _readme_block("### Web search")
+    assert sample[0] == "$ kennel ~/meetings --allow-web" and sample[1] == ""
+    shown = sample[2:]
+    assert [line.split(":")[0] for line in shown] == [line.split(":")[0] for line in real[: len(shown)]]
+    machine_specific = ("workspace:", "provider:", "model:")
+    for readme_line, real_line in zip(shown, real[: len(shown)], strict=True):
+        if not readme_line.startswith(machine_specific):
+            assert readme_line == real_line
+    assert "web search: searxng → localhost:8888 → upstream engines (remote)" in shown

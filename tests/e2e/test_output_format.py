@@ -220,3 +220,21 @@ def test_to_dict_is_json_serializable_with_every_tool_call_field():
         "metadata": {"lines": 3},
         "withheld": False,
     }
+
+
+def test_web_search_metadata_is_counts_only(meeting_ws, search_server):
+    """Issue #61: `tool.completed.metadata` and the tool call record carry counts, not results."""
+    from test_cli import HIT, WEB_FLOW, _searxng_config
+
+    search_server.reply(200, HIT)
+    _searxng_config(meeting_ws, search_server.url)
+    p = run_cli(
+        ["-p", "x", "--allow-web", "--permission-mode", "bypass", "--output-format", "stream-json"], meeting_ws, script=WEB_FLOW
+    )
+    assert p.returncode == 0, p.stderr
+    lines = [json.loads(line) for line in p.stdout.splitlines()]
+    [completed] = [e for e in lines if e.get("type") == "tool.completed"]
+    assert completed["data"]["metadata"] == {"provider": "searxng", "returned": 1}
+    result = lines[-1]
+    assert result["type"] == "result" and result["tool_calls"][0]["metadata"] == {"provider": "searxng", "returned": 1}
+    assert "Kennel release notes" not in p.stdout and "v0.1 shipped" not in p.stdout
