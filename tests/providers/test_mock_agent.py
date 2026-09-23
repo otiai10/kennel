@@ -998,3 +998,72 @@ async def test_provider_without_a_declared_window(meeting_ws):
     assert usage.used_tokens > 0 and usage.estimated is True
     assert usage.summary().endswith("window unknown")
     await session.close()
+
+
+# -- #66: why the context figure is an estimate ------------------------------------------
+
+
+async def test_estimate_reason_is_none_when_the_provider_counts(meeting_ws):
+    """#66 AC-3: a measured figure has no reason to give."""
+    agent, _, _ = make_agent(meeting_ws, ["done"], reported_usage=Usage(input_tokens=1200, output_tokens=300))
+    session = agent.new_session()
+    await session.run("q1")
+    usage = session.context_usage()
+    assert usage.estimated is False and usage.estimate_reason is None
+    assert usage.describe_estimate() is None and "estimated" not in usage.summary()
+    await session.close()
+
+
+async def test_estimate_reason_tells_a_silent_provider_from_a_missing_session(meeting_ws):
+    """#66 AC-3: before the first request there is no provider session; after it one is live
+    and the mock provider counts nothing. The two used to read the same ("estimated")."""
+    agent, _, _ = make_agent(meeting_ws, ["done"])
+    session = agent.new_session()
+    first = session.context_usage()
+    assert first.estimated is True and first.estimate_reason == "no_live_session"
+    await session.run("q1")
+    live = session.context_usage()
+    assert live.estimated is True and live.estimate_reason == "not_reported"
+    assert live.describe_estimate() == "estimated: the provider reports no token counts"
+    assert live.summary().endswith("tokens, estimated: the provider reports no token counts)")
+    await session.close()
+
+
+async def test_estimate_reason_after_interrupt_compact_and_failure(meeting_ws):
+    """#66 AC-3: every path that retires the provider session reads "no_live_session", on a
+    provider that otherwise reports real counts too (the #57 case the CLI could not explain)."""
+    reported = Usage(input_tokens=1200, output_tokens=300)
+    turns = ["q1 done", [ToolCall("slow", {}), Text("never")], "q3 done", [Raise(ProviderError("boom", status=255))]]
+    agent, _, _ = slow_agent(meeting_ws, turns, reported_usage=reported)
+    session = agent.new_session()
+    await session.run("q1")
+    assert session.context_usage().estimate_reason is None
+
+    task = asyncio.create_task(session.run("now something slow"))
+    await asyncio.sleep(0.05)
+    session.interrupt()
+    with pytest.raises(TurnCancelledError):
+        await task
+    assert session.context_usage().estimate_reason == "no_live_session"  # interrupted
+
+    await session.run("q3")
+    assert await session.compact() is True
+    assert session.context_usage().estimate_reason == "no_live_session"  # compacted
+
+    with pytest.raises(ProviderError):
+        await session.run("q4")
+    after = session.context_usage()
+    assert after.estimate_reason == "no_live_session" and after.estimated is True  # failed
+    assert after.describe_estimate() == (
+        "estimated: no live provider session; counted from what the next one opens with"
+    )
+    await session.close()
+
+
+def test_context_usage_still_takes_the_six_original_arguments():
+    """#66 AC-3: `estimate_reason` was added last, with a default, so callers keep working."""
+    from kennel import ContextUsage
+
+    usage = ContextUsage(4096, 504, 504 / 4096, True, 1, 0)
+    assert usage.estimate_reason is None
+    assert usage.summary() == "12% of 4096 tokens (504 tokens, estimated)"

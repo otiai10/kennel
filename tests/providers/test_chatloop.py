@@ -133,7 +133,7 @@ async def test_two_tool_rounds_then_text(meeting_ws: Path):
     )
     result = await agent.run("what did we decide?")
 
-    assert result.text == "Final answer."
+    assert result.text == "Final answer." and result.stop_reason == "end_turn"  # #66 AC-1
     assert [call.name for call in result.tool_calls] == ["read", "grep"]
     assert all(call.status == "ok" for call in result.tool_calls)
     assert len(transport.calls) == 3
@@ -325,14 +325,17 @@ def repeated_rounds(count: int, arguments: str = '{"path": "notes/todo.md"}') ->
 async def test_a_wedged_model_ends_the_turn_without_spending_the_budget(meeting_ws: Path):
     """The repeated-call guardrail, not the budget, is what ends this turn (`ToolRunner`
     refuses the third identical call and gives up on the turn at the fifth), so the answer
-    arrives after six requests instead of the thirty-four the budget would have allowed."""
+    arrives after six requests instead of the thirty-four the budget would have allowed.
+
+    The loop ended there, so the turn says so the way a spent budget does (#66 AC-1)."""
     agent, transport, provider = scripted_agent(
         meeting_ws, [*repeated_rounds(5), text_round("Tell me which section you want.")]
     )
     result = await agent.run("read the notes")
 
-    assert result.stop_reason == "end_turn"  # not "tool_limit": no budget was spent
+    assert result.stop_reason == "tool_limit" and result.is_error is False
     assert result.text == "Tell me which section you want."
+    assert not any("limit" in (call.error or "") for call in result.tool_calls)  # no budget spent
     assert [call.status for call in result.tool_calls] == ["ok", "ok", "blocked", "blocked", "blocked"]
     assert len(transport.calls) == 6
     assert provider.sessions[0].messages[-1].role == "assistant"
@@ -348,7 +351,7 @@ async def test_a_withheld_result_the_model_keeps_asking_for_still_gets_an_answer
     )
     result = await agent.run("読んで")
 
-    assert result.stop_reason == "end_turn" and result.text == "どの節を読みますか。"
+    assert result.stop_reason == "tool_limit" and result.text == "どの節を読みますか。"
     assert [call.withheld for call in result.tool_calls] == [True, True, False, False, False]
     handed = [m.content for m in provider.sessions[0].messages if m.role == "tool"]
     assert handed[0].startswith("Error: the read result is")
@@ -358,16 +361,15 @@ async def test_a_withheld_result_the_model_keeps_asking_for_still_gets_an_answer
 
 
 async def test_a_model_that_never_stops_asking_ends_the_turn_with_no_text(meeting_ws: Path):
-    """The known hole, pinned rather than papered over: the extra request the loop allows is
-    the model's chance to answer, and a model that spends it on another tool call leaves the
-    turn with no text. That is the existing behaviour of the spent budget (which at least
-    reports `tool_limit`); deciding what `stop_reason` should say about an answerless turn
-    changes an external contract (`docs/output-format.md`) and is not this change's to make.
-    What issue #58 fixes is the cost: five calls, not thirty-two."""
+    """The extra request the loop allows is the model's chance to answer, and a model that
+    spends it on another tool call leaves the turn with no text. `tool_limit` is what says
+    so, as it does for the spent budget: `docs/output-format.md` defines it as "the answer
+    may be incomplete, or empty" (#66). What issue #58 fixes is the cost: five calls, not
+    thirty-two."""
     agent, transport, _ = scripted_agent(meeting_ws, repeated_rounds(30))
     result = await agent.run("read the notes")
 
-    assert result.text == "" and result.stop_reason == "end_turn"
+    assert result.text == "" and result.stop_reason == "tool_limit" and result.is_error is False
     assert len(result.tool_calls) == 5 and len(transport.calls) == 6
 
 

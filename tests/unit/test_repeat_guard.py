@@ -18,6 +18,7 @@ nothing else decides it (principle 2). What a loop does with it is pinned in
 from pathlib import Path
 
 from kennel import Agent, MockProvider
+from kennel.providers.mock import Text, ToolCall
 from kennel.runner import (
     REPEATED_CALL_REFUSAL,
     STOP_CALLING_TOOLS,
@@ -64,8 +65,13 @@ async def test_the_turn_is_stopped_without_the_budget_being_spent(tmp_path):
         await read(run)
 
     assert run.repeat_wedged is True
-    assert run.limit_hit is False  # the budget is what `stop_reason` "tool_limit" means
+    assert run.limit_hit is False  # the budget was not spent
     assert run.no_more_tool_rounds is True  # what a loop Kennel drives itself asks
+    # Giving up on one call is not the turn ending: only a loop that stopped there says so
+    # (#66), and until one does the turn is not "tool_limit".
+    assert run.tool_rounds_stopped is False
+    run.stop_tool_rounds()
+    assert run.tool_rounds_stopped is True
     assert run._turn_calls == 5 < run.max_tool_calls
 
 
@@ -121,8 +127,10 @@ async def test_begin_turn_clears_the_wedge(tmp_path):
         await read(run)
     assert run.repeat_wedged is True
 
+    run.stop_tool_rounds()
     run.begin_turn()
     assert run.repeat_wedged is False and run.no_more_tool_rounds is False
+    assert run.tool_rounds_stopped is False
     assert (await read(run)).startswith("Error: the read result is")  # the tool runs again
 
 
@@ -150,3 +158,24 @@ def test_the_window_notice_tells_the_model_not_to_resend_the_same_call():
     notice = WINDOW_EXCEEDED_NOTICE.format(tool="read", tokens=9002, window=4096)
     assert "start_line/end_line" in notice  # #47: it still says how to ask for less
     assert "Do not send this same call again with the same arguments" in notice
+
+
+# -- #66 AC-2: a provider that runs its own tool loop keeps answering after the wedge -------
+
+
+async def test_a_turn_answered_after_the_wedge_by_a_narrowed_call_is_end_turn(tmp_path):
+    """Apple's SDK loops by itself and never asks ``no_more_tool_rounds``. The guardrail gives
+    up on the repeated read, the model narrows it and answers: the turn did not end at the
+    cutoff, so ``stop_reason`` stays ``end_turn`` even though ``repeat_wedged`` is set."""
+    (tmp_path / "ja.txt").write_text(("会議の記録。" * 20 + "\n") * 100)
+    repeated = [ToolCall("read", {"path": "ja.txt"}) for _ in range(5)]
+    narrowed = ToolCall("read", {"path": "ja.txt", "start_line": 1, "end_line": 2})
+    provider = MockProvider([[*repeated, narrowed, Text("冒頭は会議の記録です。")]])
+    agent = Agent(tmp_path, tools=["read"], provider=provider)
+    session = agent.new_session()
+    result = await session.run("読んで")
+
+    assert session.runner.repeat_wedged is True  # the mark is there
+    assert result.stop_reason == "end_turn" and result.text == "冒頭は会議の記録です。"
+    assert [call.status for call in result.tool_calls] == ["ok", "ok", "blocked", "blocked", "blocked", "ok"]
+    await session.close()
