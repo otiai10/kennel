@@ -364,7 +364,7 @@ def test_project_config_is_applied(meeting_ws):
     p = run_cli(["-p", "x"], meeting_ws)
     assert p.returncode == 0, p.stderr
     assert "tool call limit (2 per turn) reached" in p.stdout
-    assert "(tool call limit reached" in p.stdout
+    assert "(tool calls stopped: the per-turn limit or a repeated call" in p.stdout
 
 
 @pytest.mark.skipif(not hasattr(os, "openpty"), reason="pty needed")
@@ -486,7 +486,10 @@ def test_usage_command_reports_the_context_window(meeting_ws):
     assert len(blocks) == 3, out  # one per /usage
     for block in blocks[1:]:
         assert block.startswith("4096 tokens\nused: ")
-        assert "(estimated)\ncontext: " in block
+    # #66 AC-4: an estimate says why. No provider session exists before the first request;
+    # after it one is live, and the mock provider counts nothing.
+    assert "(estimated: no live provider session; counted from what the next one opens with)\ncontext: " in blocks[1]
+    assert "(estimated: the provider reports no token counts)\ncontext: " in blocks[2]
     before = int(blocks[1].split("used: ")[1].split(" tokens")[0])
     after = int(blocks[2].split("used: ")[1].split(" tokens")[0])
     assert after > before  # the turn and its tool output now sit in the window

@@ -29,6 +29,13 @@ if TYPE_CHECKING:
     from .agent import Agent
 
 
+#: What each :attr:`ContextUsage.estimate_reason` means, in the words the CLI shows.
+ESTIMATE_REASONS = {
+    "not_reported": "the provider reports no token counts",
+    "no_live_session": "no live provider session; counted from what the next one opens with",
+}
+
+
 @dataclass
 class ContextUsage:
     """How much of the model's context window the live conversation occupies.
@@ -37,6 +44,12 @@ class ContextUsage:
     the instructions (including a compaction summary, when there is one) plus the
     turns since that session was opened. Compacting therefore lowers it, which is
     the point of showing it.
+
+    ``estimate_reason`` says why ``used_tokens`` is an estimate, as a fact the session can
+    check rather than a guess about its past (issue #66): ``None`` when the provider counted
+    it, ``"not_reported"`` when a provider session is live but the provider returns no
+    count, ``"no_live_session"`` when no provider session is live (before the first request,
+    or after one was retired by an interrupt, a timeout, a failed request or a compaction).
     """
 
     window_tokens: int | None
@@ -45,10 +58,19 @@ class ContextUsage:
     estimated: bool
     turns: int
     compactions: int
+    estimate_reason: str | None = None
+
+    def describe_estimate(self) -> str | None:
+        """``estimated: <why>`` for an estimate (just ``estimated`` without a reason), else ``None``."""
+        if not self.estimated:
+            return None
+        reason = ESTIMATE_REASONS.get(self.estimate_reason or "", self.estimate_reason)
+        return f"estimated: {reason}" if reason else "estimated"
 
     def summary(self) -> str:
-        """One line for the CLI: ``12% of 4096 tokens (504 tokens, estimated)``."""
-        detail = f"{self.used_tokens} tokens" + (", estimated" if self.estimated else "")
+        """One line for the CLI: ``12% of 4096 tokens (504 tokens, estimated: <why>)``."""
+        estimate = self.describe_estimate()
+        detail = f"{self.used_tokens} tokens" + (f", {estimate}" if estimate else "")
         if self.window_tokens is None:
             return f"{detail}, window unknown"
         return f"{self.ratio:.0%} of {self.window_tokens} tokens ({detail})"
@@ -59,8 +81,9 @@ class AgentResult:
     """The outcome of one turn. :meth:`to_dict` is the machine-readable form.
 
     ``is_error`` marks a turn that did not produce a usable answer (a timeout, or
-    an error the caller turned into a result). ``tool_limit`` is not an error: the
-    answer is there, only possibly incomplete.
+    an error the caller turned into a result). ``tool_limit`` — tool calls ran out, through
+    the per-turn budget or the repeated-call guardrail — is not an error: the answer may be
+    incomplete, or empty.
     """
 
     text: str
@@ -132,6 +155,10 @@ class Session:
         self._task: asyncio.Task[Any] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._interrupted = False
+        #: Has this turn started a generation call (``respond`` / ``stream`` /
+        #: ``respond_structured``)? Only then can a failure have left the provider session in
+        #: an unknown state, so only then does :meth:`_fail_turn` retire it (issue #72).
+        self._generation_started = False
         self.runner = ToolRunner(
             agent.tools,
             agent.tool_context(),
@@ -307,16 +334,22 @@ class Session:
         ``used_tokens`` drops to what the *next* session will open with (a summary of
         the history so far), even on a provider that otherwise reports real counts.
         That is not a lost conversation, just a switch from "what the retired session
-        held" to "what the next one will start with".
+        held" to "what the next one will start with". ``estimate_reason`` tells the two
+        cases apart: ``"no_live_session"`` here, ``"not_reported"`` while a session is live
+        on a provider that counts nothing.
         """
         window = self.agent.provider.info.context_window_tokens
         measured = self._reported_usage()
+        reason: str | None = None
         if measured is not None:
-            used, estimated = (measured.input_tokens or 0) + (measured.output_tokens or 0), False
+            used = (measured.input_tokens or 0) + (measured.output_tokens or 0)
         else:
-            used, estimated = math.ceil(self._estimate_window_tokens()), True
+            used = math.ceil(self._estimate_window_tokens())
+            reason = "not_reported" if self._provider_session is not None else "no_live_session"
         ratio = min(1.0, used / window) if window else 0.0
-        return ContextUsage(window, used, ratio, estimated, len(self.history), self.compactions)
+        return ContextUsage(
+            window, used, ratio, reason is not None, len(self.history), self.compactions, reason
+        )
 
     def _reported_usage(self) -> Usage | None:
         """What the live provider session counted, when the provider counts at all."""
@@ -357,10 +390,13 @@ class Session:
 
         The turn lands in :attr:`history` with ``stop_reason="error"`` and the tool calls
         it did make, so ``/usage``, ``/status`` and :meth:`context_usage` stop pretending
-        it never happened. The live provider session is retired through :meth:`compact`
-        because the provider gives no way to tell whether the failed prompt and its tool
-        output stayed in its transcript; the next turn resumes from a summary instead of
-        from an undefined state.
+        it never happened. Once this turn has started a generation call, the live provider
+        session is retired through :meth:`compact`, because the provider gives no way to
+        tell whether the failed prompt and its tool output stayed in its transcript; the
+        next turn resumes from a summary instead of from an undefined state. A turn that
+        failed before sending anything (a raising ``before_prompt`` hook) left that session
+        exactly as the previous turn did, so it is kept and ``compactions`` does not move
+        (issue #72).
 
         Callers must raise afterwards: this reports the failure, it does not swallow it.
         """
@@ -379,7 +415,7 @@ class Session:
             "duration_ms": round((time.perf_counter() - started) * 1000, 3),
         }
         self.last_failure = failure
-        if self._provider_session is not None:
+        if self._generation_started and self._provider_session is not None:
             await self.compact()
         self._emit(EventType.SESSION_FAILED, **failure)
 
@@ -410,6 +446,7 @@ class Session:
         self._task = asyncio.current_task()
         self._loop = asyncio.get_running_loop()
         self._interrupted = False
+        self._generation_started = False
         self._open_event_log()  # idempotent; before the first event so it lands in the file
         if not self._started:
             self._started = True
@@ -442,6 +479,7 @@ class Session:
             if schema is None:
                 return await self._generate(sent, on_delta)
             provider = await self._provider(self._compaction_note())
+            self._generation_started = True
             data = await provider.respond_structured(sent, schema)
             structured = data
             # Guided generation arrives whole, so the answer is one delta.
@@ -492,7 +530,7 @@ class Session:
                 await self._abandon_turn(text)
             except (ContextLimitError, asyncio.TimeoutError):
                 pass  # keep the narrated answer rather than fail the turn
-        if stop_reason == "end_turn" and self.runner.limit_hit:
+        if stop_reason == "end_turn" and self.runner.tool_rounds_stopped:
             stop_reason = "tool_limit"
         records = self.runner.turn_records()
         self.history.append(Turn(prompt, text, stop_reason, records))
@@ -637,6 +675,7 @@ class Session:
 
     async def _generate(self, prompt: str, on_delta: Callable[[str], None] | None) -> str:
         provider = await self._provider(self._compaction_note())
+        self._generation_started = True
         if on_delta is None:
             return await provider.respond(prompt)
         parts: list[str] = []

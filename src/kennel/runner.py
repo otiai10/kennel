@@ -140,6 +140,7 @@ class ToolRunner:
         self._refusals_in_a_row = 0
         self._given_up: set[tuple[str, str]] = set()
         self._turn_cancelled = False
+        self._rounds_stopped = False
 
     def begin_turn(self) -> None:
         with self._lock:
@@ -150,6 +151,7 @@ class ToolRunner:
             self._refusals_in_a_row = 0
             self._given_up.clear()
             self._turn_cancelled = False
+            self._rounds_stopped = False
 
     @property
     def repeat_wedged(self) -> bool:
@@ -177,6 +179,29 @@ class ToolRunner:
         the whole lever.
         """
         return self.limit_hit or self.repeat_wedged
+
+    def stop_tool_rounds(self) -> None:
+        """Record that a loop Kennel drives ended this turn because tool rounds ran out.
+
+        ``ChatLoopSession`` calls this when it returns from the last round that
+        :attr:`no_more_tool_rounds` allowed. It is the fact ``repeat_wedged`` alone does not
+        give: on a provider that runs its own tool loop (Apple's SDK) the guardrail can give up
+        on one call while the model goes on to answer through a narrowed one, and that turn did
+        not end here (issue #66).
+        """
+        with self._lock:
+            self._rounds_stopped = True
+
+    @property
+    def tool_rounds_stopped(self) -> bool:
+        """Did this turn end because its tool calls ran out?
+
+        True when the per-turn budget was spent (``limit_hit``) or a loop reported through
+        :meth:`stop_tool_rounds` that it stopped there. ``Session.run`` turns this into
+        ``stop_reason`` ``"tool_limit"``; which of the two it was stays in the ``blocked``
+        records.
+        """
+        return self.limit_hit or self._rounds_stopped
 
     def cancel_turn(self) -> None:
         """Mark the current turn cancelled: in-flight calls are still recorded but emit no events."""

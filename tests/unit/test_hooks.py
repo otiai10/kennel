@@ -16,9 +16,10 @@ from kennel import (
     PermissionKind,
     PermissionManager,
     PermissionRequest,
+    ProviderError,
     ToolResult,
 )
-from kennel.providers.mock import Text, ToolCall
+from kennel.providers.mock import Raise, Text, ToolCall
 
 
 def make_agent(meeting_ws, turns, **kw):
@@ -309,6 +310,57 @@ async def test_a_raising_before_prompt_hook_leaves_the_session_usable(meeting_ws
     assert result.text == "ok"
     assert result.stop_reason == "end_turn"
     assert provider.sessions[-1].prompts == ["second\n\ncontext"]
+
+
+async def test_a_hook_failure_before_sending_keeps_the_provider_session(meeting_ws):
+    """#72 AC-1 / AC-3: the prompt never reached the provider, so its session is not retired.
+
+    The turn is still a failed turn on every record (history, ``last_failure``,
+    ``session.failed``); what changes is that ``compactions`` stays put and the next turn
+    runs on the very provider session the first one opened.
+    """
+    calls = [0]
+
+    def second_turn_fails(prompt, session):
+        calls[0] += 1
+        if calls[0] == 2:
+            raise RuntimeError("policy exploded")
+
+    agent, provider, events = make_agent(meeting_ws, ["one", "two"], hooks=Hooks(before_prompt=[second_turn_fails]))
+    async with agent.new_session() as session:
+        await session.run("first")
+        opened = session._provider_session
+        with pytest.raises(HookError):
+            await session.run("second")
+        assert session.compactions == 0 and session.context_usage().compactions == 0
+        assert session._provider_session is opened and not opened.closed
+        assert [turn.stop_reason for turn in session.history] == ["end_turn", "error"]
+        assert session.last_failure["error_type"] == "HookError"
+        assert [e.data["error"] for e in events if e.type == EventType.SESSION_FAILED] == ["hook failed: policy exploded"]
+        # A live session is still there, so the estimate says so (#66 decision 4 / #72).
+        assert session.context_usage().estimate_reason == "not_reported"
+
+        result = await session.run("third")
+        assert result.text == "two" and result.stop_reason == "end_turn" and result.compactions == 0
+    assert provider.sessions == [opened]
+    assert opened.prompts == ["first", "third"]  # "second" never reached the provider
+
+
+async def test_a_failure_after_sending_still_retires_the_provider_session(meeting_ws):
+    """#72 AC-2 / AC-3: once the request went out, the provider may or may not have kept it,
+    so the session is retired as before and ``compactions`` grows by one."""
+    turns = ["one", [Raise(ProviderError("boom", status=255))], "three"]
+    agent, provider, events = make_agent(meeting_ws, turns)
+    async with agent.new_session() as session:
+        await session.run("first")
+        opened = session._provider_session
+        with pytest.raises(ProviderError):
+            await session.run("second")
+        assert session.compactions == 1 and session._provider_session is None and opened.closed
+        assert [turn.stop_reason for turn in session.history] == ["end_turn", "error"]
+        result = await session.run("third")
+    assert result.text == "three" and result.compactions == 1
+    assert len(provider.sessions) == 2 and provider.sessions[1].prompts == ["third"]
 
 
 async def test_a_raising_before_prompt_hook_fails_stream_after_the_event(meeting_ws):

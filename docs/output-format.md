@@ -55,8 +55,8 @@ object.
 | --- | --- | --- |
 | `type` | `"result"` | discriminator; always `result` |
 | `text` | string | the final answer (empty on error) |
-| `stop_reason` | `"end_turn"` \| `"tool_limit"` \| `"timeout"` \| `"cancelled"` \| `"error"` | why the turn ended |
-| `is_error` | boolean | the turn produced no usable answer. `tool_limit` is **not** an error: the answer is there, only possibly incomplete |
+| `stop_reason` | `"end_turn"` \| `"tool_limit"` \| `"timeout"` \| `"cancelled"` \| `"error"` | why the turn ended. `tool_limit`: tool calls ran out and the turn ended there — the per-turn budget was spent, or the repeated-call guardrail stopped a model that kept sending the same call. Which of the two is in the `blocked` [tool call](#tool-call-object)'s `error` |
+| `is_error` | boolean | the turn produced no usable answer. `tool_limit` is **not** an error: the answer may be incomplete, and may be empty |
 | `error` | string \| null | the user-facing message when `is_error` is true |
 | `duration_ms` | number | wall-clock time of the turn (0 when it failed before starting) |
 | `session_id` | string | the session this turn ran in (empty when it failed before the session started) |
@@ -109,10 +109,12 @@ provider; nothing here is inferred (constitution principle 4).
 | `duration_ms` | number | how long the turn ran before it failed |
 
 A failed turn is also kept in the session's history with `stop_reason: "error"` and the tool
-calls it did make, so `/usage`, `/status` and `Session.context_usage()` account for it. The
-provider session is retired after a failure (the conversation is compacted), because the
-provider gives no way to tell whether the failed prompt stayed in its transcript;
-`compactions` therefore grows by one and the next turn resumes from a summary.
+calls it did make, so `/usage`, `/status` and `Session.context_usage()` account for it. When
+the failure came after the request was sent to the provider, the provider session is retired
+(the conversation is compacted), because the provider gives no way to tell whether the failed
+prompt stayed in its transcript; `compactions` therefore grows by one and the next turn
+resumes from a summary. A failure before anything was sent (a `before_prompt` hook that
+raised) retires nothing: the provider session is kept and `compactions` does not change.
 
 ## Event objects
 

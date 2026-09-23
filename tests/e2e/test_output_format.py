@@ -4,11 +4,27 @@ Schema: docs/output-format.md.
 """
 
 import json
+from pathlib import Path
 
+import pytest
 from test_cli import TRANSCRIPT_FLOW, run_cli
 
-from kennel import AgentResult, Usage
+from kennel import (
+    Agent,
+    AgentResult,
+    EventType,
+    HookError,
+    Hooks,
+    MockProvider,
+    ProviderError,
+    Usage,
+)
+from kennel.providers.base import ModelProvider, ProviderInfo
+from kennel.providers.chatloop import ChatChunk, ChatLoopSession, ToolCallDelta
+from kennel.providers.mock import Raise
 from kennel.runner import ToolCallRecord
+
+OUTPUT_FORMAT_DOC = Path(__file__).resolve().parents[2] / "docs" / "output-format.md"
 
 RESULT_KEYS = {
     "type",
@@ -189,6 +205,73 @@ def test_tool_limit_is_not_an_error(meeting_ws):
     assert p.returncode == 0, p.stderr
     result = json.loads(p.stdout)
     assert result["stop_reason"] == "tool_limit" and result["is_error"] is False
+
+
+class _SameCallTransport:
+    """A chat-completions model wedged on one call: every request asks for the same read."""
+
+    async def stream(self, messages, tools, schema):
+        yield ChatChunk(tool_calls=[ToolCallDelta(0, "call", "read", '{"path": "notes/todo.md"}')])
+
+    async def close(self) -> None:
+        pass
+
+
+class _WedgedChatProvider(ModelProvider):
+    info = ProviderInfo(name="scripted", model="ScriptedModel", context_window_tokens=4096)
+
+    async def create_session(self, *, instructions, tools, invoke):
+        return ChatLoopSession(_SameCallTransport(), instructions=instructions, tools=tools, invoke=invoke)
+
+
+async def test_a_turn_the_repeated_call_guardrail_ended_is_tool_limit(meeting_ws):
+    """#66 AC-1 / AC-5: `tool_limit` covers the repeated-call cutoff too. Not an error, the
+    answer may be empty, and the reason is in the blocked record, not in a new value or key."""
+    agent = Agent(meeting_ws, tools=["read"], provider=_WedgedChatProvider())
+    events = []
+    agent.events.subscribe(events.append)
+    payload = (await agent.run("read the notes")).to_dict()
+
+    assert set(payload) == RESULT_KEYS
+    assert payload["stop_reason"] == "tool_limit" and payload["is_error"] is False
+    assert payload["text"] == "" and payload["error"] is None
+    assert payload["tool_calls"][-1]["status"] == "blocked"
+    assert payload["tool_calls"][-1]["error"] == "refused 3 times in a row; not run again this turn"
+    # The events are unchanged: model.completed carries the same stop_reason under its old keys.
+    [completed] = [e for e in events if e.type == EventType.MODEL_COMPLETED]
+    assert completed.data == {"stop_reason": "tool_limit", "chars": 0, "tool_calls": 5}
+    assert all(set(e.data) == {"tool", "summary", "error"} for e in events if e.type == EventType.TOOL_FAILED)
+
+
+def test_the_contract_says_what_tool_limit_and_a_failed_turn_mean():
+    """#66 AC-5 / #72 AC-4: the document changed with the behaviour."""
+    doc = OUTPUT_FORMAT_DOC.read_text()
+    assert "the repeated-call guardrail stopped a model that kept sending the same call" in doc
+    assert "the answer may be incomplete, and may be empty" in doc
+    assert "A failure before anything was sent (a `before_prompt` hook that\nraised) retires nothing" in doc
+
+
+async def test_compactions_count_only_failures_after_the_request_was_sent(meeting_ws):
+    """#72 AC-4: `compactions` in the result object moves for a failure the provider saw, not
+    for one that happened before anything was sent."""
+    broken = [False]
+
+    def hook(prompt, session):
+        if broken[0]:
+            raise RuntimeError("policy exploded")
+
+    provider = MockProvider(["one", [Raise(ProviderError("boom", status=255))], "three", "four"])
+    agent = Agent(meeting_ws, provider=provider, hooks=Hooks(before_prompt=[hook]))
+    async with agent.new_session() as session:
+        assert (await session.run("first")).to_dict()["compactions"] == 0
+        with pytest.raises(ProviderError):
+            await session.run("sent, then failed")
+        assert (await session.run("third")).to_dict()["compactions"] == 1
+        broken[0] = True
+        with pytest.raises(HookError):
+            await session.run("never sent")
+        broken[0] = False
+        assert (await session.run("fourth")).to_dict()["compactions"] == 1
 
 
 def test_to_dict_is_json_serializable_with_every_tool_call_field():

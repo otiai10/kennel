@@ -28,6 +28,9 @@ from .terminal import discard_typed_ahead
 
 PROMPT = "> "
 
+#: The note after a ``tool_limit`` turn. Both ways tool calls run out end up there (#66).
+TOOLS_STOPPED_NOTE = "(tool calls stopped: the per-turn limit or a repeated call; answer may be incomplete)"
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -398,7 +401,7 @@ def run_once(
             renderer.error("the model did not finish within the turn timeout")
             code = 1
         elif result.stop_reason == "tool_limit":
-            renderer.note("(tool call limit reached; answer may be incomplete)")
+            renderer.note(TOOLS_STOPPED_NOTE)
     finally:
         loop.run_until_complete(session.close())  # the closing events precede the result line
         loop.close()
@@ -415,7 +418,7 @@ def run_once(
 def _usage_lines(session: Session) -> str:
     u = session.context_usage()
     window = "unknown" if u.window_tokens is None else f"{u.window_tokens} tokens"
-    used = f"{u.used_tokens} tokens" + (" (estimated)" if u.estimated else " (reported by the provider)")
+    used = f"{u.used_tokens} tokens ({u.describe_estimate() or 'reported by the provider'})"
     ratio = "n/a" if u.window_tokens is None else f"{u.ratio:.0%}"
     return f"window: {window}\nused: {used}\ncontext: {ratio}\nturns: {u.turns}\ncompactions: {u.compactions}\n"
 
@@ -599,7 +602,7 @@ def run_interactive(agent: Agent, renderer: Renderer, prompter: ConsolePrompter 
             renderer.finish_answer()
             renderer.note(f"(context: {session.context_usage().summary()})")
             if result is not None and result.stop_reason == "tool_limit":
-                renderer.note("(tool call limit reached; answer may be incomplete)")
+                renderer.note(TOOLS_STOPPED_NOTE)
             elif result is not None and result.stop_reason == "timeout":
                 renderer.error("the model did not finish within the turn timeout")
             out.write("\n")

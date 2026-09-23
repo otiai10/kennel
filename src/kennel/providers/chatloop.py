@@ -161,6 +161,18 @@ def _limit_reached(invoke: ToolInvoker) -> bool:
     return bool(limit() if callable(limit) else limit)
 
 
+def _report_rounds_stopped(invoke: ToolInvoker) -> None:
+    """Tell the tool runner behind ``invoke`` that the loop ended the turn at its last round.
+
+    Found the same way as :func:`_limit_reached`: ``ToolRunner.stop_tool_rounds`` on the
+    object the invoker is bound to. ``Session.run`` reads it back as ``stop_reason``
+    ``"tool_limit"`` (issue #66). Any other invoker has no such method and is told nothing.
+    """
+    report = getattr(getattr(invoke, "__self__", None), "stop_tool_rounds", None)
+    if callable(report):
+        report()
+
+
 def _merge_delta(calls: dict[int, ToolCall], delta: ToolCallDelta) -> None:
     """Fold a streamed fragment into the call at its ``index``.
 
@@ -250,22 +262,24 @@ class ChatLoopSession(ProviderSession):
                     _merge_delta(calls, delta)
             text = "".join(parts)
             requested = [calls[index] for index in sorted(calls)]
+            if last_round:
+                # Tool calls ran out and this was the one request allowed after that, so the
+                # turn ends here whatever the model sent. Session.run reports it as
+                # stop_reason "tool_limit", a spent budget and a model wedged on one call
+                # alike; the guardrail's own records in the trace say which (issue #66).
+                _report_rounds_stopped(self._invoke)
             if not requested:
                 self.messages.append(ChatMessage("assistant", text))
                 return
             if last_round:
-                # Tool calls have run out and the model is still asking. Stop here, and
-                # leave the request out of the conversation: a stored assistant message
-                # whose tool calls have no replies is not a conversation a model can be
-                # asked to continue. Session.run reports a spent budget as stop_reason
-                # "tool_limit"; a turn stopped by the repeated-call guardrail ends as
-                # "end_turn", with the guardrail's own records in the trace.
-                # What this does not cover: a model that asks for tools in this last round
-                # too leaves the turn with no answer text at all (and, under
-                # respond_structured, with a ProviderError from parsing ""). That predates
-                # issue #58 on the budget path; closing it means deciding what stop_reason
-                # says about an answerless turn, which docs/output-format.md fixes as an
-                # external contract.
+                # The model is still asking. Stop here, and leave the request out of the
+                # conversation: a stored assistant message whose tool calls have no replies
+                # is not a conversation a model can be asked to continue.
+                # Such a turn has no answer text; "tool_limit" allows for that (it may be
+                # empty). What this does not cover: under respond_structured the empty text
+                # is parsed as JSON and fails as a ProviderError. That predates issue #58 on
+                # the budget path and was left out of #66 on purpose: an answerless
+                # structured turn needs its own external contract.
                 return
             self.messages.append(ChatMessage("assistant", text or None, tool_calls=requested))
             for call in requested:
