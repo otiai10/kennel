@@ -204,7 +204,7 @@ class FileSessionStore:
                 fd = self._open_private(lock_path, os.O_RDWR)
             except OSError as exc:
                 log.warning("session %s is not locked: cannot create %s: %s", session_id, lock_path, exc)
-                return _no_op
+                return lambda: None
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -231,10 +231,6 @@ class FileSessionStore:
             os.close(fd)  # closing drops the flock
 
         return release
-
-
-def _no_op() -> None:
-    return None
 
 
 def _drop_partial_line(fd: int) -> None:

@@ -282,13 +282,18 @@ def resume_target(agent: Agent, args: argparse.Namespace) -> str | None:
     return args.resume
 
 
-def open_session(agent: Agent, session_id: str | None, loop: asyncio.AbstractEventLoop) -> Session:
-    """A new session, or the saved conversation ``session_id`` (which must exist)."""
-    session = agent.new_session(session_id=session_id)
-    if session_id is not None and not session.resumed:
-        loop.run_until_complete(session.close())
-        raise ConfigurationError(f"--resume: no saved conversation {session_id!r} in this workspace")
-    return session
+def open_session(agent: Agent, session_id: str | None) -> tuple[asyncio.AbstractEventLoop, Session]:
+    """A loop plus a new session, or the saved conversation ``session_id`` (which must exist)."""
+    loop = asyncio.new_event_loop()
+    try:
+        session = agent.new_session(session_id=session_id)
+        if session_id is not None and not session.resumed:
+            loop.run_until_complete(session.close())
+            raise ConfigurationError(f"--resume: no saved conversation {session_id!r} in this workspace")
+    except BaseException:
+        loop.close()
+        raise
+    return loop, session
 
 
 def build_doctor_parser() -> argparse.ArgumentParser:
@@ -422,12 +427,7 @@ def run_once(
     schema: dict | None = None,
     session_id: str | None = None,
 ) -> int:
-    loop = asyncio.new_event_loop()
-    try:
-        session = open_session(agent, session_id, loop)
-    except BaseException:
-        loop.close()
-        raise
+    loop, session = open_session(agent, session_id)
     result: AgentResult | None = None
     failed: KennelError | None = None
     failure: dict[str, Any] | None = None
@@ -616,12 +616,7 @@ def run_interactive(
     # screen because the terminal echoed them at keypress time and we never touch ECHO --
     # a terminal mode we changed is a terminal mode a hard crash can leave broken.
     out = renderer.out
-    loop = asyncio.new_event_loop()
-    try:
-        session = open_session(agent, session_id, loop)
-    except BaseException:
-        loop.close()
-        raise
+    loop, session = open_session(agent, session_id)
     out.write(_header(agent) + "\n\n")
     out.flush()
     commands = _build_commands(agent, session, renderer, loop)

@@ -220,17 +220,17 @@ class Session:
         if self._started and not self._failed:
             self._emit(EventType.SESSION_COMPLETED, turns=len(self.history))
         self._close_event_log()  # after the closing event, so the log ends with it
-        release, self._release_store = self._release_store, None
-        if release is not None:
-            release()
+        if self._release_store is not None:
+            self._release_store()
+            self._release_store = None
 
     # -- saved conversations (#62) -------------------------------------------
 
     def _open_store(self, store: SessionStore, requested: str | None) -> None:
         """Claim this id in ``store`` and, for an id the caller chose, read its turns back.
 
-        A chosen id must pass :func:`~kennel.sessions.check_session_id` (an empty one too,
-        rather than silently becoming a new random id).
+        The store validates the id the caller chose — an empty one too, rather than letting it
+        silently become a new random id.
 
         The restored turns only fill :attr:`history`; no provider session exists yet, so the
         first turn opens one seeded with the summary of that history (:meth:`_compaction_note`),
@@ -238,11 +238,7 @@ class Session:
         Session grants are not part of a transcript: they live in the agent's
         ``PermissionManager`` for as long as the process does.
         """
-        from .sessions import check_session_id  # sessions imports this module
-
-        if requested is not None:
-            check_session_id(requested)
-        release = store.lock(self.id)
+        release = store.lock(requested if requested is not None else self.id)
         try:
             if requested is not None:
                 self.history = store.load(self.id)
