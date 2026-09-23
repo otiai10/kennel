@@ -150,7 +150,7 @@ tells the model to ask for a smaller part instead:
 ● Read big.txt [1-200]
   ↳ 4,912 bytes (~1,228 tokens)
 big.txt starts with ...
-(context: 38% of 4096 tokens (1556 tokens, estimated))
+(context: 38% of 4096 tokens (1556 tokens, estimated: the provider reports no token counts))
 ```
 
 Only the whole-window case is withheld; everything else is bounded by `tools.max_output_bytes`
@@ -163,7 +163,7 @@ Kennel does not dress an estimate up as a measurement. `/usage` is the longer fo
 ```text
 > /usage
 window: 4096 tokens
-used: 504 tokens (estimated)
+used: 504 tokens (estimated: the provider reports no token counts)
 context: 12%
 turns: 1
 compactions: 0
@@ -267,8 +267,9 @@ The iterator's last event is `session.completed`, whose `data` carries `text`, `
 and `AgentResult.failure` in the machine formats) says what the failed turn had sent — the
 provider's status code, the bytes of tool output it added and how full the window was before
 the request, flagged `estimated` while the provider counts no tokens. The failed turn stays in
-the history with `stop_reason "error"`, and its provider session is retired, so the next turn
-resumes from a summary. `Agent.stream(prompt)` is the one-shot form: it
+the history with `stop_reason "error"`. If the request had already gone to the provider, its
+provider session is retired, so the next turn resumes from a summary; a failure before
+anything was sent (a raising `before_prompt` hook) keeps the session as it was. `Agent.stream(prompt)` is the one-shot form: it
 runs a throwaway session and its final `session.completed` event carries the same `text` that
 `Agent.run()` would return. `run(on_delta=...)` still works and is unchanged.
 
@@ -301,8 +302,9 @@ u.window_tokens     # 4096 on Apple's on-device model; None if the provider decl
 u.used_tokens       # what the live provider session holds right now
 u.ratio             # 0.0-1.0 (0.0 when no window is declared)
 u.estimated         # True when Kennel estimated it from text rather than being told
+u.estimate_reason   # why: None (measured), "not_reported" or "no_live_session"
 u.turns, u.compactions
-print(u.summary())  # "12% of 4096 tokens (504 tokens, estimated)"
+print(u.summary())  # "12% of 4096 tokens (504 tokens, estimated: the provider reports no token counts)"
 ```
 
 `used_tokens` counts what is *in the live provider session*: the instructions plus the turns
@@ -529,7 +531,7 @@ kennel ~/meetings --provider llama-server
 - Right after `Ctrl-C`, a timeout, a failed turn or `/compact`, `/usage` briefly switches
   back to *estimated*: the provider session that was being counted just got retired, so
   there is nothing left to ask, and the next turn opens a fresh one counted from a summary
-  (see `Session.context_usage()`).
+  (see `Session.context_usage()`). `/usage` says so: *estimated: no live provider session*.
 - A server started with `--api-key` needs the same key in `KENNEL_LLAMA_SERVER_API_KEY`;
   Kennel then sends `Authorization: Bearer <key>` on every request, and sends none when the
   variable is unset. The key is read from the environment only — `providers.llama-server.api_key`
