@@ -114,11 +114,19 @@ Hooks (`src/kennel/hooks.py`) are the opposite kind of callback: they decide. `b
 `mode` is not a setting: `LlamaServerProvider` derives it from its `base_url`, and only a loopback host (`127.0.0.0/8`, `::1`, `localhost`) may call itself `local`. `LlamaCppProvider` is `local` unconditionally, which it has earned: the model is in this process and no port is opened at all. It is decided without any I/O, at construction, so a remote endpoint shows up in the CLI header before the first request. The provider talks to a server the user started: Kennel neither downloads a model nor launches a process, and adds nothing to a request body unless `extra_body` says so. `check_availability()` is where `/props` (`n_ctx`) and `/v1/models` (the model name) are read, and it runs once on the first `create_session()` if the caller never asked, so `info` is honest for an SDK consumer too. `LlamaCppProvider` answers the same question the same way and deliberately *without* loading anything: the import, the file and `n_ctx`, so `kennel doctor` and `Agent(...)` never wait for a model. `create_session()` calls it before the load for the same reason llama-server probes there — an SDK caller who never asked still gets the install hint or the path, not an `ImportError` from inside the load.
 
 Providers are chosen by name, and `kennel.providers.registry` is the only place that maps a
-name to an implementation: a static dict of `ProviderSpec(name, factory, doctor_checks)` plus
-`register()`, shared by `Agent`, the CLI and `kennel doctor` (entry points are deliberately not
-read). `factory(**options)` takes provider-specific keyword arguments; `doctor_checks(**options)`
+name to an implementation: a static dict of `ProviderSpec(name, factory, doctor_checks, secrets)`
+plus `register()`, shared by `Agent`, the CLI and `kennel doctor` (entry points are deliberately
+not read). `factory(**options)` takes provider-specific keyword arguments; `doctor_checks(**options)`
 is optional and returns the `Check`s (`kennel.diagnostics`) that `kennel doctor` shows for that
 provider — the `apple_fm_sdk` and model-availability checks live with `AppleProvider`.
+`secrets` (last, so the positional form keeps its meaning) declares which factory arguments are
+API keys, with the same `Secret` and `kennel.credentials` functions as search providers:
+`resolve_options(name, options)` is the one place that refuses a key written as a config value,
+reads each declared key from its environment variable and returns the factory's arguments, and
+both `create()` and `kennel doctor` go through it (the config loader runs the same refusal when
+it reads `providers.<name>`). Only `llama-server` declares one, the optional `api_key` from
+`KENNEL_LLAMA_SERVER_API_KEY`; the provider gets the value, never the variable's name, so its
+HTTP 401 message says only whether a key was sent, and `kennel doctor` names the variable.
 
 ```python
 from kennel import ProviderSpec, register_provider, create_provider

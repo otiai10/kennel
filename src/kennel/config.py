@@ -47,6 +47,7 @@ from typing import Any
 
 from .errors import ConfigurationError
 from .permissions import PermissionMode, parse_policy
+from .providers import registry as provider_registry
 from .providers.registry import DEFAULT_PROVIDER
 from .search import registry as search_registry
 from .tools.base import ToolLimits
@@ -130,16 +131,16 @@ def _merge_providers(
     return merged
 
 
-def _check_search_providers(value: Any, source: str) -> None:
-    """``search_providers``: options per name, where a secret may only be a variable name."""
+def _check_provider_options(value: Any, source: str, key: str, noun: str, registry: Any) -> None:
+    """``providers`` / ``search_providers``: options per name, where a secret may only be a
+    variable name. ``registry`` is the module that knows the names (``where``, ``check_options``)."""
     if not isinstance(value, dict):
-        raise ConfigurationError(f"{source}: 'search_providers' must be an object keyed by search provider name")
+        raise ConfigurationError(f"{source}: '{key}' must be an object keyed by {noun} name")
     for name, options in value.items():
-        where = search_registry.where(name)
         if not isinstance(options, dict):
-            raise ConfigurationError(f"{source}: {where} must be an object")
+            raise ConfigurationError(f"{source}: {registry.where(name)} must be an object")
         try:
-            search_registry.check_options(name, options)
+            registry.check_options(name, options)
         except ConfigurationError as exc:
             raise ConfigurationError(f"{source}: {exc}") from None
 
@@ -201,20 +202,15 @@ def apply_config(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>"
             raise ConfigurationError(f"{source}: 'provider' must be a provider name (a string)")
         cfg.provider = data["provider"]
     if "providers" in data:
-        providers = data["providers"]
-        if not isinstance(providers, dict):
-            raise ConfigurationError(f"{source}: 'providers' must be an object keyed by provider name")
-        for name, options in providers.items():
-            if not isinstance(options, dict):
-                raise ConfigurationError(f"{source}: providers.{name} must be an object")
-        cfg.providers = _merge_providers(cfg.providers, providers)
+        _check_provider_options(data["providers"], source, "providers", "provider", provider_registry)
+        cfg.providers = _merge_providers(cfg.providers, data["providers"])
     if "search_provider" in data:
         value = data["search_provider"]
         if value is not None and not isinstance(value, str):
             raise ConfigurationError(f"{source}: 'search_provider' must be a search provider name (a string) or null")
         cfg.search_provider = value
     if "search_providers" in data:
-        _check_search_providers(data["search_providers"], source)
+        _check_provider_options(data["search_providers"], source, "search_providers", "search provider", search_registry)
         cfg.search_providers = _merge_providers(cfg.search_providers, data["search_providers"])
     perms = data.get("permissions", {})
     if not isinstance(perms, dict):

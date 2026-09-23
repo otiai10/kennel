@@ -5,6 +5,8 @@ Start one and point the tests at it::
     llama-server -hf Qwen/Qwen3-4B-GGUF:Q4_K_M --jinja -c 32768 --port 8080 --host 127.0.0.1
     KENNEL_LLAMA_SERVER=http://127.0.0.1:8080 pytest tests/integration -m llama
 
+A server started with ``--api-key`` needs the same key in ``KENNEL_LLAMA_SERVER_API_KEY``.
+
 They assert structure, token counts and tool traces, never exact model wording.
 """
 
@@ -29,9 +31,11 @@ FIXTURE = Path(__file__).parent.parent / "fixtures" / "meeting_project"
 
 @pytest.fixture(scope="module")
 def provider():
-    from kennel.providers.llama_server import LlamaServerProvider
+    from kennel.providers.registry import create
 
-    p = LlamaServerProvider(base_url=BASE_URL)
+    # Through the registry, so a server started with --api-key works when
+    # KENNEL_LLAMA_SERVER_API_KEY is set (issue #74).
+    p = create("llama-server", base_url=BASE_URL)
     p.check_availability()
     return p
 

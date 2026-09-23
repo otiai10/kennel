@@ -68,12 +68,15 @@ unless explicitly enabled (`--allow-web`, which asks before every search) and gi
 provider; no search provider is chosen by default. Search results reach the model only:
 events and the session log record how many results came back, not their text.
 
-**Keys stay in the environment.** A search provider's API key is read from an environment
-variable only; a key written into `kennel.json` or the user settings file is refused, because
+**Keys stay in the environment.** A search provider's or a model provider's API key (for
+example `KENNEL_LLAMA_SERVER_API_KEY` for a `llama-server` started with `--api-key`) is read
+from an environment variable only; a key written into `kennel.json` or the user settings file is refused, because
 the agent can read the workspace's `kennel.json` with its own `read` tool and a prompt
 injection could then send the key out inside a query. Key values never appear in errors,
 events, `kennel doctor` or `/status`, and they are not passed to `shell` (whose environment
-is an allowlist).
+is an allowlist). When llama-server refuses a key (HTTP 401), its response body is dropped
+rather than written into the error, the events or the session log. A key sent over plain
+`http://` to another host can be read on the way; `kennel doctor` warns about it.
 
 ## What is not enforced
 

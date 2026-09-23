@@ -23,12 +23,13 @@ from ..config import (
     load_config,
     read_config_file,
 )
-from ..credentials import SECRETS_KEY, secret_status
+from ..credentials import SECRETS_KEY, SecretStatus, secret_status
 from ..diagnostics import Check
-from ..errors import ConfigurationError
+from ..errors import ConfigurationError, ProviderError
 from ..events import state_dir
 from ..permissions import DEFAULT_MODE, PermissionMode
-from ..providers.registry import DEFAULT_PROVIDER, spec
+from ..providers import registry as provider_registry
+from ..providers.registry import DEFAULT_PROVIDER
 from ..registry import DEFAULT_TOOLS
 from ..search import registry as search_registry
 from ..workspace import Workspace, WorkspaceError
@@ -51,18 +52,56 @@ def _check_platform() -> Check:
     return Check("platform", True, f"{system} ({platform.machine()})")
 
 
+def _secret_checks(label: str, owner: str, statuses: list[SecretStatus]) -> list[Check]:
+    """One line per declared secret: which variable is read and whether it is set. Never the value."""
+    checks = []
+    for status in statuses:
+        state = "set" if status.present else "not set" if status.required else "not set (optional)"
+        ok = status.present or not status.required
+        checks.append(
+            Check(
+                f"{label} {status.param}",
+                ok,
+                f"{owner} {status.param}: {status.env} {state}",
+                hint=None if ok else f"export {status.env}=... (the key is read from the environment only)",
+            )
+        )
+    return checks
+
+
+def _unauthorized_hint(statuses: list[SecretStatus]) -> str:
+    """What to do about a 401, naming the variables the keys are actually read from."""
+    unset = [s.env for s in statuses if not s.present]
+    if unset:
+        return " / ".join(f"export {env}=<the server's key>" for env in unset)
+    names = ", ".join(s.env for s in statuses)
+    return f"{names} is set but the server rejected it; make it match the key the server was started with"
+
+
 def _provider_checks(name: str, options: dict[str, Any]) -> list[Check]:
-    """Which provider was selected, plus whatever that provider wants checked."""
+    """Which provider was selected, its keys (set or not), plus whatever that provider wants checked."""
     try:
-        provider_spec = spec(name)
+        provider_spec = provider_registry.spec(name)
     except ConfigurationError as exc:
         return [Check("provider", False, str(exc), hint="fix 'provider' in the config or pass --provider")]
     checks = [Check("provider", True, f"provider {name}")]
+    try:
+        statuses = secret_status(provider_spec.secrets, options.get(SECRETS_KEY), where=provider_registry.where(name))
+        checks.extend(_secret_checks("provider key", name, statuses))
+        resolved = provider_registry.resolve_options(name, options)
+    except ConfigurationError as exc:
+        return [*checks, Check(name, False, str(exc), hint=f"fix {provider_registry.where(name)} in the config")]
     if provider_spec.doctor_checks is not None:
         try:
-            checks.extend(provider_spec.doctor_checks(**options))
+            checks.extend(provider_spec.doctor_checks(**resolved))
         except Exception as exc:  # noqa: BLE001 - one provider's checks must not stop the rest
-            checks.append(Check(f"provider {name} checks", False, f"could not run them: {exc}"))
+            if isinstance(exc, ProviderError) and exc.status == 401 and statuses:
+                # Raised by the provider's checks so the hint can name the variable read here.
+                checks.extend(getattr(exc, "checks", ()))
+                checks.append(Check(name, False, str(exc), hint=_unauthorized_hint(statuses)))
+                checks.append(Check("model", False, f"skipped: {name} refused the request"))
+            else:
+                checks.append(Check(f"provider {name} checks", False, f"could not run them: {exc}"))
     return checks
 
 
@@ -84,18 +123,7 @@ def _search_checks(cfg: KennelConfig | None) -> list[Check]:
         statuses = secret_status(search_spec.secrets, options.get(SECRETS_KEY), where=search_registry.where(name))
     except ConfigurationError as exc:
         return [Check("web search", False, str(exc), hint=hint)]
-    checks = []
-    for status in statuses:
-        state = "set" if status.present else "not set"
-        ok = status.present or not status.required
-        checks.append(
-            Check(
-                f"web search key {status.param}",
-                ok,
-                f"{name} {status.param}: {status.env} {state}",
-                hint=None if ok else f"export {status.env}=... (the key is read from the environment only)",
-            )
-        )
+    checks = _secret_checks("web search key", name, statuses)
     if not all(c.ok for c in checks):
         return [Check("web search", True, f"web search: {name}"), *checks, Check("web search reachable", False, f"skipped: {name} has no key")]
     try:

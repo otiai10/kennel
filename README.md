@@ -482,6 +482,12 @@ register_provider(ProviderSpec("echo", lambda **options: EchoProvider(**options)
 agent = Agent(".", provider="echo")
 ```
 
+A provider that needs an API key declares it instead of taking it from the config:
+`ProviderSpec("echo", factory, secrets={"api_key": Secret("ECHO_API_KEY")})` makes Kennel read
+`ECHO_API_KEY` and pass it as `api_key=`, refuse `providers.echo.api_key` written as a value,
+and show in `kennel doctor` whether the variable is set — the same mechanism as the web search
+keys below.
+
 ### llama-server (a bigger context window, no Apple Intelligence needed)
 
 The on-device model's window is 4096 tokens, which a 20KB file does not fit. The
@@ -523,6 +529,17 @@ kennel ~/meetings --provider llama-server
   back to *estimated*: the provider session that was being counted just got retired, so
   there is nothing left to ask, and the next turn opens a fresh one counted from a summary
   (see `Session.context_usage()`).
+- A server started with `--api-key` needs the same key in `KENNEL_LLAMA_SERVER_API_KEY`;
+  Kennel then sends `Authorization: Bearer <key>` on every request, and sends none when the
+  variable is unset. The key is read from the environment only — `providers.llama-server.api_key`
+  in a config file is refused, because the agent can read `kennel.json`. To reuse the variable
+  llama-server itself reads, name it:
+  `{"providers": {"llama-server": {"secrets": {"api_key": "LLAMA_API_KEY"}}}}`. The default is
+  deliberately a different name, so a key exported to start a local server is not sent to a
+  `base_url` on another host. A refused key fails with HTTP 401 and a message that says whether
+  a key was sent; `kennel doctor` shows which variable is read and warns when the key would go
+  over plain `http://` to another host (it is still sent: a key is better than none, but use
+  `https://` on a network you do not trust).
 - Any OpenAI-compatible server (Ollama, LM Studio, mlx-lm) speaks the same protocol, but
   llama-server is the one Kennel is tested against.
 

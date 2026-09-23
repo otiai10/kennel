@@ -22,6 +22,14 @@ Q4_K_M, ``-c 32768 --jinja``, 2026-09-18):
 * Overflowing the window is HTTP 400 with ``error.type ==
   "exceed_context_size_error"``, which maps to :class:`ContextLimitError` so
   ``Session.run``'s compact-and-retry applies unchanged.
+* A server started with ``--api-key`` (measured 2026-09-23) answers ``/props``,
+  ``/v1/models`` and ``POST /v1/chat/completions`` with HTTP 401 and
+  ``{"error": {"message": "Invalid API Key", "type": "authentication_error"}}`` both
+  without a key and with a wrong one; only ``/health`` stays open. ``api_key`` is sent as
+  ``Authorization: Bearer`` on every request, and a 401 becomes a fixed message that says
+  whether a key was sent: the server's body is dropped so nothing it says reaches events
+  or the session log. The key comes from the environment (``KENNEL_LLAMA_SERVER_API_KEY``
+  by default, see the registry), never from the config file.
 
 Threading: ``http.client`` is blocking, so every request runs on a worker thread
 that hands parsed SSE events to the caller's loop through an
@@ -41,7 +49,7 @@ import json
 import socket
 import threading
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -57,6 +65,7 @@ from .base import ModelProvider, ProviderInfo, ProviderSession, ToolInvoker, Usa
 from .chatloop import ChatChunk, ChatLoopSession, ChatMessage, ToolCallDelta
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8080"
+API_KEY_ENV = "KENNEL_LLAMA_SERVER_API_KEY"  # the default declared in providers/registry.py
 DEFAULT_TIMEOUT = 300.0
 
 START_HINT = (
@@ -64,6 +73,11 @@ START_HINT = (
     "-c 32768 --port 8080 --host 127.0.0.1 (brew install llama.cpp). Kennel does not "
     "download models or start the server itself. Point elsewhere with "
     'providers.llama-server.base_url in kennel.json.'
+)
+
+_KEY_HINT = (
+    f"Set {API_KEY_ENV} to the server's --api-key, or name another variable in "
+    "providers.llama-server.secrets.api_key; `kennel doctor` shows which variable is read."
 )
 
 
@@ -76,6 +90,7 @@ class _Endpoint:
     host: str
     port: int
     prefix: str  # path prefix from the base URL, "" in the usual case
+    api_key: str | None = field(default=None, repr=False)  # never in a repr
 
     def connection(self, timeout: float) -> http.client.HTTPConnection:
         factory = http.client.HTTPSConnection if self.scheme == "https" else http.client.HTTPConnection
@@ -83,6 +98,18 @@ class _Endpoint:
 
     def path(self, suffix: str) -> str:
         return f"{self.prefix}{suffix}"
+
+    def headers(self, base: dict[str, str]) -> dict[str, str]:
+        """``base`` plus ``Authorization: Bearer`` when there is a key."""
+        return {**base, "Authorization": f"Bearer {self.api_key}"} if self.api_key else base
+
+    def http_error(self, status: int, raw: bytes) -> BaseException:
+        return _http_error(status, raw, key_sent=bool(self.api_key))
+
+    @property
+    def sends_key_in_clear(self) -> bool:
+        """A key over plain http to another machine can be read on the way."""
+        return bool(self.api_key) and self.scheme == "http" and not self.is_loopback
 
     @property
     def is_loopback(self) -> bool:
@@ -96,7 +123,7 @@ class _Endpoint:
             return False
 
 
-def _parse_base_url(base_url: str) -> _Endpoint:
+def _parse_base_url(base_url: str, api_key: str | None = None) -> _Endpoint:
     parts = urlsplit(base_url if "//" in base_url else f"//{base_url}", scheme="http")
     if parts.hostname is None:
         raise ConfigurationError(f"llama-server: base_url {base_url!r} has no host")
@@ -106,14 +133,26 @@ def _parse_base_url(base_url: str) -> _Endpoint:
         host=parts.hostname,
         port=parts.port or (443 if scheme == "https" else 80),
         prefix=parts.path.rstrip("/"),
+        api_key=api_key or None,
     )
 
 
 # -- errors ------------------------------------------------------------------
 
 
-def _http_error(status: int, raw: bytes) -> BaseException:
-    """Map a non-200 response to the error a Kennel consumer should see."""
+def _http_error(status: int, raw: bytes, *, key_sent: bool = False) -> BaseException:
+    """Map a non-200 response to the error a Kennel consumer should see.
+
+    A 401 gets a fixed message, without the server's body: all the provider knows is
+    whether it sent a key, not which variable the key came from.
+    """
+    if status == 401:
+        what = (
+            "llama-server rejected the API key that was sent (HTTP 401)."
+            if key_sent
+            else "llama-server refused the request (HTTP 401): no API key was sent."
+        )
+        return ProviderError(f"{what} {_KEY_HINT}", status=401)
     text = raw.decode("utf-8", "replace")
     error: Any = None
     try:
@@ -145,7 +184,7 @@ def _transport_error(exc: BaseException) -> BaseException:
 def _get_json(endpoint: _Endpoint, path: str, timeout: float) -> dict[str, Any]:
     conn = endpoint.connection(timeout)
     try:
-        conn.request("GET", endpoint.path(path), headers={"Accept": "application/json"})
+        conn.request("GET", endpoint.path(path), headers=endpoint.headers({"Accept": "application/json"}))
         response = conn.getresponse()
         raw = response.read()
     except OSError as exc:
@@ -153,7 +192,7 @@ def _get_json(endpoint: _Endpoint, path: str, timeout: float) -> dict[str, Any]:
     finally:
         conn.close()
     if response.status != 200:
-        raise _http_error(response.status, raw)
+        raise endpoint.http_error(response.status, raw)
     try:
         data = json.loads(raw.decode("utf-8", "replace"))
     except ValueError as exc:
@@ -198,14 +237,14 @@ async def _post_sse(
                 "POST",
                 endpoint.path(path),
                 json.dumps(body),
-                {"Content-Type": "application/json", "Accept": "text/event-stream"},
+                endpoint.headers({"Content-Type": "application/json", "Accept": "text/event-stream"}),
             )
             # Taken now, not from the finally below: a response that closes the
             # connection takes the socket with it and leaves conn.sock as None.
             sock = conn.sock
             response = conn.getresponse()
             if response.status != 200:
-                put(_http_error(response.status, response.read()))
+                put(endpoint.http_error(response.status, response.read()))
                 return
             for raw in response:
                 line = raw.decode("utf-8", "replace").strip()
@@ -332,6 +371,8 @@ class LlamaServerProvider(ModelProvider):
     overrides the name the server reports, ``timeout`` bounds each socket
     operation, and ``extra_body`` is merged into every request body for
     model-specific knobs such as ``chat_template_kwargs``; Kennel adds none itself.
+    ``api_key`` is sent as ``Authorization: Bearer`` on every request; the registry
+    passes it from the environment, and no repr or message carries it.
     """
 
     def __init__(
@@ -341,9 +382,10 @@ class LlamaServerProvider(ModelProvider):
         model: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         extra_body: dict[str, Any] | None = None,
+        api_key: str | None = None,
     ) -> None:
         self.base_url = base_url
-        self._endpoint = _parse_base_url(base_url)
+        self._endpoint = _parse_base_url(base_url, api_key)
         self._model = model
         self._timeout = float(timeout)
         self._extra_body = dict(extra_body) if extra_body else None
@@ -391,7 +433,13 @@ def llama_server_provider(**options: Any) -> LlamaServerProvider:
 
 
 def llama_server_doctor_checks(**options: Any) -> list[Check]:
-    """The ``kennel doctor`` checks for a llama-server: is it there, and what is it running?"""
+    """The ``kennel doctor`` checks for a llama-server: is it there, and what is it running?
+
+    A 401 is raised rather than turned into a check: the hint for it has to name the
+    variable the key is actually read from, which only ``kennel doctor`` knows (the
+    provider is given the key, never where it came from). The checks made before it
+    (the plain-http warning) travel on the exception as ``checks``.
+    """
     try:
         provider = LlamaServerProvider(**options)
     except (ConfigurationError, TypeError) as exc:
@@ -399,16 +447,31 @@ def llama_server_doctor_checks(**options: Any) -> list[Check]:
             Check("llama-server", False, f"llama-server options: {exc}", hint="fix providers.llama-server in the config"),
             Check("model", False, "skipped: the provider could not be built"),
         ]
+    warnings = []
+    if provider._endpoint.sends_key_in_clear:
+        warnings.append(
+            Check(
+                "llama-server key transport",
+                True,
+                f"warning: the API key is sent unencrypted to {provider._endpoint.host} over http://; "
+                "use https:// unless the network is trusted",
+            )
+        )
     try:
         provider.check_availability()
     except ProviderError as exc:
+        if exc.status == 401:
+            exc.checks = warnings  # type: ignore[attr-defined]  # kennel doctor shows them first
+            raise
         return [
+            *warnings,
             Check("llama-server", False, str(exc), hint=START_HINT),
             Check("model", False, f"skipped: {provider.base_url} is not reachable"),
         ]
     info = provider.info
     window = f"{info.context_window_tokens} tokens" if info.context_window_tokens else "not declared"
     return [
+        *warnings,
         Check("llama-server", True, f"llama-server at {provider.base_url} reachable (mode: {info.mode})"),
         Check("model", True, f"{info.model} (context window: {window})"),
     ]
