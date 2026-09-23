@@ -443,6 +443,9 @@ def _header(agent: Agent) -> str:
         f"permissions: {agent.permission_mode.value}" + (f" ({rules})" if rules else ""),
         f"tools: {tools}",
     ]
+    web = agent.web_search()
+    if web is not None:
+        lines.append(f"web search: {web}")
     if agent.permission_mode is PermissionMode.BYPASS:
         lines.append(BYPASS_WARNING)
     lines.append("Type /help for commands, /exit or Ctrl-D to quit.")

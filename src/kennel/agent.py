@@ -66,7 +66,7 @@ class Agent:
         self.permission_mode = PermissionMode.parse(mode_spec) if mode_spec is not None else DEFAULT_MODE
         reg = registry or builtin_registry()
         default_tools = self.config.tools or self.permission_mode.tools() or DEFAULT_TOOLS
-        resolved = reg.resolve(tools, default_tools)
+        resolved = reg.resolve(tools, default_tools, self.config)
         self.tools: dict[str, Tool] = {t.name: t for t in resolved}
         policy: dict[str, Decision | str] = dict(self.config.permissions)
         policy.update(permissions or {})
@@ -87,6 +87,17 @@ class Agent:
             return provider
         name = provider if provider is not None else self.config.provider
         return create_provider(name, **self.config.providers.get(name, {}))
+
+    def web_search(self) -> str | None:
+        """Where the ``web`` tool sends searches (``"searxng → host → upstream engines (remote)"``).
+
+        ``None`` when ``web`` is not enabled or no search provider is set up. This is the
+        search service's own mode; ``provider.info.mode`` stays the model's.
+        """
+        from .tools.web import WebSearchTool
+
+        tool = self.tools.get("web")
+        return tool.describe() if isinstance(tool, WebSearchTool) else None
 
     def _build_instructions(self, extra: str | None) -> str:
         base = self.system_prompt if self.system_prompt is not None else DEFAULT_INSTRUCTIONS

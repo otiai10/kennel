@@ -18,6 +18,11 @@ permission rules approved from the prompt) with the standard library alone::
       "permissions": { "write": "ask", "shell": "ask", "shell(git *)": "allow" },
       "provider": "apple",
       "providers": { "apple": { "deterministic": false } },
+      "search_provider": "searxng",
+      "search_providers": {
+        "searxng": { "url": "http://localhost:8888" },
+        "brave": { "secrets": { "api_key": "BRAVE_API_KEY" } }
+      },
       "tools": {
         "max_output_bytes": 65536,
         "read": { "max_lines": 400, "max_file_bytes": 2000000 },
@@ -26,6 +31,10 @@ permission rules approved from the prompt) with the standard library alone::
         "shell": { "timeout_seconds": 30 }
       }
     }
+
+``search_provider`` has no default: web search stays unconfigured until one is chosen, and
+the ``web`` tool is only enabled explicitly (``--allow-web``). API keys are never written
+here -- ``secrets`` only names the environment variable to read (:mod:`kennel.credentials`).
 """
 
 from __future__ import annotations
@@ -36,9 +45,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .credentials import SECRETS_KEY, variable_names
 from .errors import ConfigurationError
 from .permissions import PermissionMode, parse_policy
 from .providers.registry import DEFAULT_PROVIDER
+from .search import registry as search_registry
 from .tools.base import ToolLimits
 
 USER_CONFIG_PATH = Path("~/.config/kennel/settings.json").expanduser()
@@ -63,6 +74,8 @@ class KennelConfig:
     permissions: dict[str, str] = field(default_factory=dict)
     provider: str = DEFAULT_PROVIDER
     providers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    search_provider: str | None = None
+    search_providers: dict[str, dict[str, Any]] = field(default_factory=dict)
     tools: list[str] | None = None
     instructions: str | None = None
     system_prompt: str | None = None
@@ -88,6 +101,8 @@ class KennelConfig:
                 raise ConfigurationError(f"Unknown config key: {key}")
             if key == "providers":
                 cfg.providers = _merge_providers(cfg.providers, value)
+            elif key == "search_providers":
+                cfg.search_providers = _merge_providers(cfg.search_providers, value)
             elif key == "permissions":
                 cfg.permissions = {**cfg.permissions, **{k: str(v.value if hasattr(v, "value") else v) for k, v in value.items()}}
             else:
@@ -116,11 +131,30 @@ def _merge_providers(
     return merged
 
 
+def _check_search_providers(value: Any, source: str) -> None:
+    """``search_providers``: options per name, where a secret may only be a variable name."""
+    if not isinstance(value, dict):
+        raise ConfigurationError(f"{source}: 'search_providers' must be an object keyed by search provider name")
+    for name, options in value.items():
+        where = search_registry.where(name)
+        if not isinstance(options, dict):
+            raise ConfigurationError(f"{source}: {where} must be an object")
+        try:
+            search_registry.check_options(name, options)
+            if name in search_registry.names():
+                variable_names(search_registry.spec(name).secrets, options.get(SECRETS_KEY), where=where)
+            elif not isinstance(options.get(SECRETS_KEY, {}), dict):
+                raise ConfigurationError(f"{where}.{SECRETS_KEY} must be an object of variable names")
+        except ConfigurationError as exc:
+            raise ConfigurationError(f"{source}: {exc}") from None
+
+
 def apply_config(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>") -> KennelConfig:
     cfg = dataclasses.replace(
         cfg,
         permissions=dict(cfg.permissions),
         providers={name: dict(options) for name, options in cfg.providers.items()},
+        search_providers={name: dict(options) for name, options in cfg.search_providers.items()},
         sources=list(cfg.sources),
     )
     agent = data.get("agent", {})
@@ -179,6 +213,14 @@ def apply_config(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>"
             if not isinstance(options, dict):
                 raise ConfigurationError(f"{source}: providers.{name} must be an object")
         cfg.providers = _merge_providers(cfg.providers, providers)
+    if "search_provider" in data:
+        value = data["search_provider"]
+        if value is not None and not isinstance(value, str):
+            raise ConfigurationError(f"{source}: 'search_provider' must be a search provider name (a string) or null")
+        cfg.search_provider = value
+    if "search_providers" in data:
+        _check_search_providers(data["search_providers"], source)
+        cfg.search_providers = _merge_providers(cfg.search_providers, data["search_providers"])
     perms = data.get("permissions", {})
     if not isinstance(perms, dict):
         raise ConfigurationError(f"{source}: 'permissions' must be an object")
