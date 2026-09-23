@@ -131,11 +131,11 @@ def _merge_providers(
     return merged
 
 
-def _check_provider_options(value: Any, source: str, key: str, registry: Any) -> None:
+def _check_provider_options(value: Any, source: str, key: str, noun: str, registry: Any) -> None:
     """``providers`` / ``search_providers``: options per name, where a secret may only be a
     variable name. ``registry`` is the module that knows the names (``where``, ``check_options``)."""
     if not isinstance(value, dict):
-        raise ConfigurationError(f"{source}: '{key}' must be an object keyed by {key[:-1].replace('_', ' ')} name")
+        raise ConfigurationError(f"{source}: '{key}' must be an object keyed by {noun} name")
     for name, options in value.items():
         if not isinstance(options, dict):
             raise ConfigurationError(f"{source}: {registry.where(name)} must be an object")
@@ -202,7 +202,7 @@ def apply_config(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>"
             raise ConfigurationError(f"{source}: 'provider' must be a provider name (a string)")
         cfg.provider = data["provider"]
     if "providers" in data:
-        _check_provider_options(data["providers"], source, "providers", provider_registry)
+        _check_provider_options(data["providers"], source, "providers", "provider", provider_registry)
         cfg.providers = _merge_providers(cfg.providers, data["providers"])
     if "search_provider" in data:
         value = data["search_provider"]
@@ -210,7 +210,7 @@ def apply_config(cfg: KennelConfig, data: dict[str, Any], source: str = "<dict>"
             raise ConfigurationError(f"{source}: 'search_provider' must be a search provider name (a string) or null")
         cfg.search_provider = value
     if "search_providers" in data:
-        _check_provider_options(data["search_providers"], source, "search_providers", search_registry)
+        _check_provider_options(data["search_providers"], source, "search_providers", "search provider", search_registry)
         cfg.search_providers = _merge_providers(cfg.search_providers, data["search_providers"])
     perms = data.get("permissions", {})
     if not isinstance(perms, dict):

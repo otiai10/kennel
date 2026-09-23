@@ -109,7 +109,10 @@ def test_only_llama_server_declares_a_secret(name: str):
 
 
 def test_llama_server_declares_an_optional_key():
+    from kennel.providers.llama_server import API_KEY_ENV
+
     assert dict(spec("llama-server").secrets) == {"api_key": Secret("KENNEL_LLAMA_SERVER_API_KEY", required=False)}
+    assert API_KEY_ENV == "KENNEL_LLAMA_SERVER_API_KEY"  # the 401 message names the same default
 
 
 def test_options_of_a_provider_without_secrets_pass_through_unchanged():

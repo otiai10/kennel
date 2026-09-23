@@ -99,11 +99,9 @@ class _Endpoint:
     def path(self, suffix: str) -> str:
         return f"{self.prefix}{suffix}"
 
-    def headers(self, **base: str) -> dict[str, str]:
+    def headers(self, base: dict[str, str]) -> dict[str, str]:
         """``base`` plus ``Authorization: Bearer`` when there is a key."""
-        if self.api_key:
-            base["Authorization"] = f"Bearer {self.api_key}"
-        return base
+        return {**base, "Authorization": f"Bearer {self.api_key}"} if self.api_key else base
 
     def http_error(self, status: int, raw: bytes) -> BaseException:
         return _http_error(status, raw, key_sent=bool(self.api_key))
@@ -186,7 +184,7 @@ def _transport_error(exc: BaseException) -> BaseException:
 def _get_json(endpoint: _Endpoint, path: str, timeout: float) -> dict[str, Any]:
     conn = endpoint.connection(timeout)
     try:
-        conn.request("GET", endpoint.path(path), headers=endpoint.headers(Accept="application/json"))
+        conn.request("GET", endpoint.path(path), headers=endpoint.headers({"Accept": "application/json"}))
         response = conn.getresponse()
         raw = response.read()
     except OSError as exc:
@@ -239,7 +237,7 @@ async def _post_sse(
                 "POST",
                 endpoint.path(path),
                 json.dumps(body),
-                endpoint.headers(**{"Content-Type": "application/json", "Accept": "text/event-stream"}),
+                endpoint.headers({"Content-Type": "application/json", "Accept": "text/event-stream"}),
             )
             # Taken now, not from the finally below: a response that closes the
             # connection takes the socket with it and leaves conn.sock as None.
