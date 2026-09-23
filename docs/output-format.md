@@ -85,7 +85,7 @@ The fields of `kennel.ToolCallRecord`:
 | `truncated` | boolean | the result was cut to the output limit |
 | `duration_ms` | number | execution time |
 | `error` | string \| null | why it failed |
-| `metadata` | object | tool-specific extras |
+| `metadata` | object | tool-specific extras; counts and names, never content (`web`: `{"provider", "returned"}`, the search provider's name and the number of results) |
 | `withheld` | boolean | the result was too big for the model's whole context window, so the model got a short "ask for a smaller part" instruction instead of it |
 
 ### Failure object

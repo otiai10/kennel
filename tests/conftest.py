@@ -70,3 +70,82 @@ def meeting_ws(tmp_path: Path) -> Path:
     dst = tmp_path / "meeting_project"
     shutil.copytree(FIXTURES / "meeting_project", dst)
     return dst
+
+
+# -- a fake HTTP search service (issue #61) -------------------------------------
+
+
+class FakeSearchServer:
+    """A loopback HTTP server that answers every GET with ``reply`` (tests never leave the machine).
+
+    ``stall`` holds the response back; ``body_chunks`` streams that many copies of ``body``;
+    ``requests`` records ``(path, headers)`` and ``disconnected`` is set when a client leaves
+    before the response was complete.
+    """
+
+    def __init__(self) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.status = 200
+        self.body: bytes = b'{"results": []}'
+        self.headers: dict[str, str] = {}
+        self.stall = 0.0
+        self.body_chunks = 1
+        self.send_length = True
+        self.requests: list[tuple[str, dict[str, str]]] = []
+        self.disconnected = threading.Event()
+        server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):  # keep test output quiet
+                pass
+
+            def do_GET(self):  # noqa: N802 - http.server's naming
+                import time
+
+                server.requests.append((self.path, dict(self.headers)))
+                deadline = time.monotonic() + server.stall
+                while time.monotonic() < deadline:
+                    time.sleep(0.02)
+                try:
+                    self.send_response(server.status)
+                    for key, value in server.headers.items():
+                        self.send_header(key, value)
+                    if server.send_length:
+                        self.send_header("Content-Length", str(len(server.body) * server.body_chunks))
+                    self.end_headers()
+                    for _ in range(server.body_chunks):
+                        self.wfile.write(server.body)
+                        self.wfile.flush()
+                except OSError:
+                    server.disconnected.set()
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.httpd.daemon_threads = True
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def reply(self, status: int = 200, body=None, headers: dict[str, str] | None = None) -> None:
+        import json
+
+        self.status = status
+        self.body = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.headers = headers or {}
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+@pytest.fixture
+def search_server():
+    server = FakeSearchServer()
+    try:
+        yield server
+    finally:
+        server.close()

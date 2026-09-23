@@ -51,6 +51,24 @@ class ToolExecutionError(ToolError):
     """The tool ran but failed."""
 
 
+class SearchError(ToolExecutionError):
+    """A web search could not be carried out (as opposed to finding nothing).
+
+    The model only ever sees ``str(error)`` (``runner._fail``), so the message itself says
+    whether retrying can help and what the user should do; ``retryable`` and ``remedy``
+    are kept as attributes for SDK callers.
+    """
+
+    def __init__(self, message: str, *, retryable: bool, remedy: str | None = None) -> None:
+        advice = "Retrying later may help." if retryable else "Repeating this search will not help."
+        text = f"{message.rstrip('.')}. {advice}"
+        if remedy:
+            text += f" {remedy}"
+        super().__init__(text)
+        self.retryable = retryable
+        self.remedy = remedy
+
+
 class ToolOutputLimitError(ToolError):
     """Tool output exceeded a hard limit and could not be delivered."""
 

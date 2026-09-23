@@ -23,12 +23,14 @@ from ..config import (
     load_config,
     read_config_file,
 )
+from ..credentials import SECRETS_KEY, secret_status
 from ..diagnostics import Check
 from ..errors import ConfigurationError
 from ..events import state_dir
 from ..permissions import DEFAULT_MODE, PermissionMode
 from ..providers.registry import DEFAULT_PROVIDER, spec
 from ..registry import DEFAULT_TOOLS
+from ..search import registry as search_registry
 from ..workspace import Workspace, WorkspaceError
 
 __all__ = ["Check", "render_json", "render_text", "run_checks"]
@@ -61,6 +63,51 @@ def _provider_checks(name: str, options: dict[str, Any]) -> list[Check]:
             checks.extend(provider_spec.doctor_checks(**options))
         except Exception as exc:  # noqa: BLE001 - one provider's checks must not stop the rest
             checks.append(Check(f"provider {name} checks", False, f"could not run them: {exc}"))
+    return checks
+
+
+def _search_checks(cfg: KennelConfig | None) -> list[Check]:
+    """The configured search provider: where it sends queries, its keys (set or not), reachability.
+
+    Reachability is up to the provider: SearXNG sends one probe query (and says so), Brave
+    only opens a connection. Key values are never shown.
+    """
+    if cfg is None:
+        return []
+    name = cfg.search_provider
+    if name is None:
+        return [Check("web search", True, "web search: not configured (no search_provider)")]
+    options = cfg.search_providers.get(name, {})
+    hint = "fix search_provider / search_providers in the config"
+    try:
+        search_spec = search_registry.spec(name)
+        statuses = secret_status(search_spec.secrets, options.get(SECRETS_KEY), where=search_registry.where(name))
+    except ConfigurationError as exc:
+        return [Check("web search", False, str(exc), hint=hint)]
+    checks = []
+    for status in statuses:
+        state = "set" if status.present else "not set"
+        ok = status.present or not status.required
+        checks.append(
+            Check(
+                f"web search key {status.param}",
+                ok,
+                f"{name} {status.param}: {status.env} {state}",
+                hint=None if ok else f"export {status.env}=... (the key is read from the environment only)",
+            )
+        )
+    if not all(c.ok for c in checks):
+        return [Check("web search", True, f"web search: {name}"), *checks, Check("web search reachable", False, f"skipped: {name} has no key")]
+    try:
+        provider = search_registry.create(name, options)
+    except ConfigurationError as exc:
+        return [Check("web search", False, str(exc), hint=hint), *checks]
+    checks.insert(0, Check("web search", True, f"web search: {provider.info.describe()}"))
+    if search_spec.doctor_checks is not None:
+        try:
+            checks.extend(search_spec.doctor_checks(provider))
+        except Exception as exc:  # noqa: BLE001 - one provider's checks must not stop the rest
+            checks.append(Check("web search reachable", False, f"could not run {name}'s checks: {exc}"))
     return checks
 
 
@@ -149,6 +196,7 @@ def run_checks(
     options = cfg.providers.get(name, {}) if cfg is not None else {}
     checks = [_check_python(), _check_platform()]
     checks.extend(_provider_checks(name, options))
+    checks.extend(_search_checks(cfg))
     checks.append(_check_xcode())
     if user_config is not None:
         checks.append(_check_config_file(user_config, "user config"))

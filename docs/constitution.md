@@ -9,8 +9,9 @@ Kennel は会議記録のような私的な文書を扱うために存在し、�
 - ネットワークに出る機能(`web`)は既定で無効で、明示的に有効化し検索プロバイダを与えたときだけ動く
 - Kennel 本体はテレメトリを送らず、バックエンドを持たない
 - デバイスの外に出るプロバイダ(Private Cloud Compute 等)は `ProviderInfo.mode` を `local` 以外で申告し、CLI はそれを表示する
+- 検索サービスは `SearchProviderInfo.mode` で自身の行き先を申告し、CLI はモデルの `mode` とは別の行に表示する
 
-正本: `src/kennel/providers/base.py`(`ProviderInfo.mode`)、`src/kennel/tools/web.py`、README「Local-first contract」
+正本: `src/kennel/providers/base.py`(`ProviderInfo.mode`)、`src/kennel/tools/web.py`、`src/kennel/search/`、`src/kennel/credentials.py`、README「Local-first contract」
 
 ## 2. 単一境界 — 同種の判断は 1 箇所だけが下す
 
@@ -20,8 +21,9 @@ Kennel は会議記録のような私的な文書を扱うために存在し、�
 - すべてのツール呼び出しは `ToolRunner.invoke` を通り、検証・guardrail・フック・権限・実行・出力上限・イベントはそこにしか無い
 - 権限の優先順位(deny > specifier > bare、ask > allow、モードは基底層)は `PermissionManager.decision_for` だけが持つ。glob 照合は `rules.py` を `glob` ツールと権限ルールが共用する
 - `shell` は workspace 境界を越えられるので、`write` とは別の権限を持ち、`--allow-write` では有効にならない
+- ツール名からインスタンスを作るのは `ToolRegistry` だけ。`web` も設定を受け取る factory としてそこで組み立て、外で特別扱いしない
 
-正本: `src/kennel/workspace.py`、`src/kennel/runner.py`、`src/kennel/permissions.py`、`src/kennel/rules.py`、`tests/unit/test_workspace.py`、`tests/unit/test_permission_rules.py`
+正本: `src/kennel/workspace.py`、`src/kennel/runner.py`、`src/kennel/permissions.py`、`src/kennel/rules.py`、`src/kennel/registry.py`、`tests/unit/test_workspace.py`、`tests/unit/test_permission_rules.py`
 
 ## 3. 観測と介入の分離 — 観測は黙り、介入は壊れたら失敗する
 

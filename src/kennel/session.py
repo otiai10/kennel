@@ -238,7 +238,9 @@ class Session:
         await self._drop_provider()
 
     def status(self) -> dict[str, Any]:
-        return {
+        """A snapshot for ``/status``. ``mode`` is where the model runs; ``web`` (present
+        while a search provider is set up for the ``web`` tool) is where searches go."""
+        status = {
             "session_id": self.id,
             "turns": len(self.history),
             "tool_calls": len(self.runner.records),
@@ -250,6 +252,10 @@ class Session:
             "log": str(self.log_path) if self.log_path is not None else "off",
             "workspace": str(self.agent.workspace.root),
         }
+        web = self.agent.web_search()
+        if web is not None:
+            status["web"] = web
+        return status
 
     def interrupt(self) -> None:
         """Stop the turn that is running, keeping the session usable.

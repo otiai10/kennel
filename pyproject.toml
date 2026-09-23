@@ -51,6 +51,7 @@ testpaths = ["tests"]
 markers = [
   "apple: requires Apple Foundation Models on this Mac (set KENNEL_APPLE_TESTS=1 to run)",
   "llama: requires a llama.cpp model (KENNEL_LLAMA_SERVER=<base_url> for llama-server, KENNEL_LLAMA_CPP_MODEL=<gguf path> for in-process llama-cpp)",
+  "search: searches a real web search service (KENNEL_SEARXNG_URL=<url> for SearXNG, KENNEL_BRAVE_TESTS=1 with BRAVE_API_KEY for Brave)",
 ]
 
 [tool.ruff]

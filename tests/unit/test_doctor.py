@@ -33,6 +33,7 @@ def test_mock_provider_checks_pass(meeting_ws: Path, tmp_path: Path):
         "python",
         "platform",
         "provider",
+        "web search",  # issue #61: "not configured" when no search_provider is set
         "xcode",
         "user config",
         "project config",
@@ -134,3 +135,57 @@ def test_event_log_check_fails_when_the_state_dir_is_not_writable(
         assert log.hint is not None and "KENNEL_STATE_DIR" in log.hint
     finally:
         blocked.chmod(0o700)
+
+
+# -- web search (issue #61, AC-5) ---------------------------------------------------
+
+
+def _search_checks(ws: Path, tmp_path: Path, config: dict) -> dict[str, Check]:
+    (ws / "kennel.json").write_text(json.dumps(config))
+    checks = run_checks(str(ws), "mock", user_config=tmp_path / "nope-settings.json")
+    return {c.name: c for c in checks if c.name.startswith("web search")}
+
+
+def test_search_checks_report_name_destination_mode_and_probe(meeting_ws: Path, tmp_path: Path, search_server):
+    search_server.reply(200, {"results": [], "unresponsive_engines": []})
+    checks = _search_checks(meeting_ws, tmp_path, {"search_provider": "searxng", "search_providers": {"searxng": {"url": search_server.url}}})
+    netloc = search_server.url.removeprefix("http://")
+    assert checks["web search"].detail == f"web search: searxng → {netloc} → upstream engines (remote)"
+    assert checks["web search reachable"].ok
+    assert "probe query sent via upstream engines" in checks["web search reachable"].detail
+    assert search_server.requests[0][0].endswith("format=json")
+
+
+def test_searxng_json_disabled_hint(meeting_ws: Path, tmp_path: Path, search_server):
+    search_server.reply(403, b"Forbidden")
+    checks = _search_checks(meeting_ws, tmp_path, {"search_provider": "searxng", "search_providers": {"searxng": {"url": search_server.url}}})
+    reachable = checks["web search reachable"]
+    assert not reachable.ok and "search.formats" in reachable.hint and "json" in reachable.hint
+    assert "probe query" in reachable.detail
+
+
+def test_brave_key_presence_without_its_value(meeting_ws: Path, tmp_path: Path, monkeypatch):
+    import kennel.search.brave as brave
+
+    probed = []
+    monkeypatch.setattr(brave, "probe_connection", lambda endpoint: probed.append(endpoint.netloc))
+    monkeypatch.setenv("BRAVE_API_KEY", "doctor-secret-value")
+    checks = _search_checks(meeting_ws, tmp_path, {"search_provider": "brave"})
+    assert checks["web search"].detail == "web search: brave → api.search.brave.com (remote)"
+    assert checks["web search key api_key"].ok and "BRAVE_API_KEY set" in checks["web search key api_key"].detail
+    assert "connection only, no query sent" in checks["web search reachable"].detail
+    assert probed == ["api.search.brave.com"]
+    assert "doctor-secret-value" not in render_text(list(checks.values()))
+
+
+def test_brave_missing_key_is_reported(meeting_ws: Path, tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    checks = _search_checks(meeting_ws, tmp_path, {"search_provider": "brave"})
+    key = checks["web search key api_key"]
+    assert not key.ok and "BRAVE_API_KEY not set" in key.detail and "environment" in key.hint
+    assert checks["web search"].ok and not checks["web search reachable"].ok
+
+
+def test_no_search_provider_is_reported_and_passes(meeting_ws: Path, tmp_path: Path):
+    checks = _search_checks(meeting_ws, tmp_path, {})
+    assert checks["web search"].ok and "not configured" in checks["web search"].detail

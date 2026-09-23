@@ -139,3 +139,29 @@ config, default `apple`); an instance always wins. Precedence is the usual one â
 `--provider` > `Agent(provider=)` > `./kennel.json` > user config > `apple` â€” and it is
 implemented once, in `KennelConfig.merged()`. Choosing `apple` where `apple_fm_sdk` cannot be
 imported fails immediately with `ModelUnavailableError`, whose hint points at `--provider`.
+
+## Web search
+
+The `web` tool calls a `SearchProvider` (`kennel.search`): anything with an `info`
+(`SearchProviderInfo(name, destination, mode)`) and an async `search()`. An empty list means
+the service looked and found nothing; a search that could not be carried out raises
+`SearchError`, whose *message* says whether retrying can help and what to fix, because the
+model only ever receives `Error: <message>` from `ToolRunner._fail`. `mode` is the search
+service's own, `remote` unless the query never leaves the machine; it is shown on the header's
+`web search:` line and in `Session.status()["web"]`, never folded into the model's `mode`.
+
+Search providers are chosen by name in `kennel.search.registry`, the same static dict plus
+`register()` as model providers. `SearchSpec.secrets` declares which factory arguments are
+secrets (`{"api_key": Secret("BRAVE_API_KEY")}`); `kennel.credentials` reads them from the
+environment, refuses them as config values, and never puts a value in a message, so a provider
+does not know where its key came from. A missing key does not stop `Agent(...)`: the tool is
+built "unavailable" and names the variable when called. Turning the `search_provider` name into
+a tool happens only in `ToolRegistry`, whose `web` factory is registered `configured=True` and
+receives the effective config; an explicit `WebSearchTool(provider)` instance is used as given.
+
+The built-in providers (`searxng`, `brave`) only build a request and parse the answer. The
+HTTP GET is `kennel.search.http.http_get`: `http.client` on a worker thread, a deadline for the
+whole request (not only per socket operation), a socket shutdown when the awaiting task is
+cancelled (`Session.interrupt()`), and a byte limit at which reading stops. `llama_server.py`
+has its own streaming client; the two were not merged because one streams SSE and the other
+reads a bounded body.
