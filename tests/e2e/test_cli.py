@@ -253,6 +253,27 @@ def test_interactive_permissions_table_and_change(meeting_ws):
     assert "● Shell echo hi" in out and "done" in out  # ran instead of being denied
 
 
+def test_interactive_permissions_shows_mode_and_specifier_rules(meeting_ws):
+    """AC-1, AC-3 (#22): /permissions shows the mode line and the same specifier rules as the
+    header/_rule_list (single source: PermissionManager.rules), grouped per tool. A bare-decision
+    change via `/permissions <tool> <mode>` leaves those specifier rules untouched -- #17's
+    precedence (deny > specifier > bare) is unchanged, this only adds a column that shows it."""
+    (meeting_ws / "kennel.json").write_text(
+        json.dumps({"permission_mode": "default", "permissions": {"shell(git *)": "allow", "write(docs/**)": "allow"}})
+    )
+    stdin = "/permissions\n/permissions shell deny\n/permissions\n/exit\n"
+    p = run_cli([], meeting_ws, script={"turns": []}, stdin=stdin)
+    assert p.returncode == 0, p.stderr
+    out = p.stdout
+    assert out.count("mode: default") == 2  # AC-1: printed by both /permissions calls
+    assert "rules" in out
+    # header prints the rules once on startup (#17), then each of the two /permissions calls
+    assert out.count("shell(git *)=allow") == 3 and out.count("write(docs/**)=allow") == 3  # AC-1 / AC-3
+    assert f"{'shell':<8}{'ask':<10}" in out  # AC-3: before the change
+    assert f"{'shell':<8}{'deny':<10}" in out  # AC-3: after /permissions shell deny
+    assert "(shell: ask -> deny for this session)" in out
+
+
 def test_interactive_permissions_unknown_tool_and_bad_usage(meeting_ws):
     stdin = "/permissions nosuch allow\n/permissions shell\n/exit\n"
     p = run_cli([], meeting_ws, script={"turns": []}, stdin=stdin)
@@ -285,6 +306,18 @@ def test_doctor_mock_provider_exits_0(meeting_ws, tmp_path):
     assert p.stdout.startswith("Kennel ")
     assert "✓ Python" in p.stdout
     assert "effective: tools=" in p.stdout
+    assert "mode=default" in p.stdout  # AC-2 (#22): default when kennel.json sets none
+
+
+def test_doctor_effective_line_reports_permission_mode(meeting_ws, tmp_path):
+    """AC-2 (#22): the effective line reports the resolved permission_mode, not just tools/rules."""
+    (meeting_ws / "kennel.json").write_text(
+        json.dumps({"permission_mode": "accept-edits", "permissions": {"shell(git *)": "allow"}})
+    )
+    p = _run_doctor(["--provider", "mock"], meeting_ws, tmp_path / "home")
+    assert p.returncode == 0, p.stderr
+    assert "mode=accept-edits" in p.stdout
+    assert "shell(git *)=allow" in p.stdout  # unchanged: specifier rules were already shown (#16)
 
 
 def test_doctor_json_is_parseable(meeting_ws, tmp_path):

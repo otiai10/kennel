@@ -456,7 +456,11 @@ _HELP_COMMANDS = (
     ("/clear", "forget the conversation"),
     ("/compact", "summarize the conversation so far to save context"),
     ("/permissions", "show the permission decision for every tool"),
-    ("/permissions <tool> <mode>", "set a tool's decision for this session (allow, ask or deny)"),
+    (
+        "/permissions <tool> <mode>",
+        "set a tool's decision for this session (allow, ask or deny); does not touch"
+        " specifier rules, and deny still wins over them (#17)",
+    ),
     ("/exit", "leave (also /quit or Ctrl-D)"),
 )
 HELP = "Commands:\n" + "\n".join(f"  {name:<28}{desc}" for name, desc in _HELP_COMMANDS) + (
@@ -499,11 +503,17 @@ def _build_commands(
     def cmd_permissions(args: list[str]) -> None:
         if not args:
             policy = agent.permissions.policy()
-            out.write(f"{'tool':<8}{'decision':<10}session-grant\n")
+            # Same source as the header/status rule summary (_rule_list): one PermissionManager,
+            # one place that knows the precedence (deny > specifier > bare); this only groups its
+            # output per tool for display (#22).
+            specifier_rules = agent.permissions.rules(specified_only=True)
+            out.write(f"mode: {agent.permission_mode.value}\n")
+            out.write(f"{'tool':<8}{'decision':<10}{'session-grant':<15}rules\n")
             for name in sorted(agent.tools):
                 decision = policy.get(name, Decision.ALLOW)
                 grant = "yes" if agent.permissions.has_session_grant(name) else "-"
-                out.write(f"{name:<8}{decision.value:<10}{grant}\n")
+                rules = ", ".join(f"{r.key}={r.decision.value}" for r in specifier_rules if r.tool_name == name)
+                out.write(f"{name:<8}{decision.value:<10}{grant:<15}{rules}\n")
             return
         if len(args) != 2:
             renderer.note("usage: /permissions [<tool> allow|ask|deny]")

@@ -26,6 +26,7 @@ from ..config import (
 from ..diagnostics import Check
 from ..errors import ConfigurationError
 from ..events import state_dir
+from ..permissions import DEFAULT_MODE, PermissionMode
 from ..providers.registry import DEFAULT_PROVIDER, spec
 from ..registry import DEFAULT_TOOLS
 from ..workspace import Workspace, WorkspaceError
@@ -115,8 +116,10 @@ def _check_effective(cfg: KennelConfig | None, error: str | None, workspace: Wor
     if cfg is None:
         return Check("effective config", False, error or "the config could not be read")
     tools = ",".join(cfg.tools or DEFAULT_TOOLS)
+    # Same fallback Agent.__init__ uses for an unset permission_mode (agent.py): DEFAULT_MODE.
+    mode = PermissionMode.parse(cfg.permission_mode) if cfg.permission_mode is not None else DEFAULT_MODE
     permissions = ",".join(f"{k}={v}" for k, v in sorted(cfg.permissions.items())) or "(defaults)"
-    return Check("effective config", True, f"tools={tools}  permissions={permissions}")
+    return Check("effective config", True, f"tools={tools}  mode={mode.value}  permissions={permissions}")
 
 
 def _load_config(workspace_arg: str, user_config: Path | None) -> tuple[KennelConfig | None, str | None]:
