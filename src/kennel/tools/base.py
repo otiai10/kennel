@@ -95,6 +95,17 @@ class Tool(ABC):
         """
         return match_arguments(specifier, arguments)
 
+    def session_scope(self, arguments: Mapping[str, Any]) -> str | None:
+        """What "allow for this session" remembers when this call is approved that way.
+
+        ``None`` (the default) means the whole tool: every later call of it goes through.
+        A tool whose calls reach different places can narrow it (``fetch`` returns the
+        host), and then only calls with the same scope skip the prompt. The grant itself is
+        stored and consulted by :class:`~kennel.permissions.PermissionManager` only. Called
+        from the provider's tool thread, so it must not touch mutable state.
+        """
+        return None
+
     # -- validation -----------------------------------------------------------
 
     def validate(self, arguments: Mapping[str, Any] | None) -> dict[str, Any]:

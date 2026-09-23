@@ -189,3 +189,58 @@ def test_brave_missing_key_is_reported(meeting_ws: Path, tmp_path: Path, monkeyp
 def test_no_search_provider_is_reported_and_passes(meeting_ws: Path, tmp_path: Path):
     checks = _search_checks(meeting_ws, tmp_path, {})
     assert checks["web search"].ok and "not configured" in checks["web search"].detail
+
+
+# -- issue #77: an unreadable config is not replaced by guessed options ----------------------
+
+UNREADABLE_CONFIGS = {
+    "invalid json": lambda url: "{not valid json",
+    "api_key in the file": lambda url: json.dumps(
+        {"provider": "llama-server", "providers": {"llama-server": {"base_url": url, "api_key": "sk-in-the-file"}}}
+    ),
+}
+
+
+@pytest.fixture
+def no_connections(monkeypatch):
+    """Record (and refuse) every HTTP connection doctor tries to open, wherever it points."""
+    import http.client
+
+    attempts: list[tuple[str, int]] = []
+
+    def refuse(self):
+        attempts.append((self.host, self.port))
+        raise OSError("doctor must not connect anywhere in this test")
+
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", refuse)
+    return attempts
+
+
+@pytest.mark.parametrize("provider_flag", [None, "llama-server"])
+@pytest.mark.parametrize("config", sorted(UNREADABLE_CONFIGS))
+def test_unreadable_config_skips_the_provider_checks(
+    meeting_ws: Path, tmp_path: Path, search_server, no_connections, config: str, provider_flag: str | None
+):
+    """AC-1 / AC-2: no request to the configured server nor to the default base_url."""
+    (meeting_ws / "kennel.json").write_text(UNREADABLE_CONFIGS[config](search_server.url))
+    checks = run_checks(str(meeting_ws), provider_flag, user_config=tmp_path / "nope-settings.json")
+    assert no_connections == [] and search_server.requests == []
+    provider_rows = [c for c in checks if c.name.startswith(("provider", "llama-server", "model", "web search"))]
+    assert [(c.name, c.ok) for c in provider_rows] == [("provider", False)]
+    assert "skipped" in provider_rows[0].detail and "effective config" in provider_rows[0].detail
+
+
+def test_unreadable_config_keeps_the_independent_checks(meeting_ws: Path, tmp_path: Path, no_connections):
+    """AC-3: python / platform / workspace / config files still report; effective config says why."""
+    (meeting_ws / "kennel.json").write_text(UNREADABLE_CONFIGS["api_key in the file"]("http://127.0.0.1:8099"))
+    checks = run_checks(str(meeting_ws), user_config=tmp_path / "nope-settings.json")
+    by_name = {c.name: c for c in checks}
+    assert [c.name for c in checks] == [
+        "python", "platform", "provider", "xcode", "user config", "project config", "event log", "workspace", "effective config",
+    ]
+    assert by_name["python"].ok and by_name["platform"].ok and by_name["workspace"].ok and by_name["user config"].ok
+    assert by_name["project config"].detail.startswith("project config ")  # reported as before
+    assert by_name["effective config"].ok is False
+    assert "api_key" in by_name["effective config"].detail
+    text = render_text(checks)
+    assert "✗ provider skipped: the config could not be read (see effective config)" in text

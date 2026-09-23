@@ -164,23 +164,23 @@ def test_builtin_kinds_match_the_registered_tools():
 MODE_TABLE = {
     PermissionMode.READ_ONLY: (
         ("glob", "grep", "read"),
-        {"glob": "allow", "grep": "allow", "read": "allow", "write": "deny", "edit": "deny", "shell": "deny", "web": "deny"},
+        {"glob": "allow", "grep": "allow", "read": "allow", "write": "deny", "edit": "deny", "shell": "deny", "web": "deny", "fetch": "deny"},
     ),
     PermissionMode.DEFAULT: (
         None,
-        {"glob": "allow", "grep": "allow", "read": "allow", "write": "ask", "edit": "ask", "shell": "ask", "web": "deny"},
+        {"glob": "allow", "grep": "allow", "read": "allow", "write": "ask", "edit": "ask", "shell": "ask", "web": "deny", "fetch": "deny"},
     ),
     PermissionMode.ACCEPT_EDITS: (
         None,
-        {"glob": "allow", "grep": "allow", "read": "allow", "write": "allow", "edit": "allow", "shell": "ask", "web": "ask"},
+        {"glob": "allow", "grep": "allow", "read": "allow", "write": "allow", "edit": "allow", "shell": "ask", "web": "ask", "fetch": "ask"},
     ),
     PermissionMode.DONT_ASK: (
         None,
-        {"glob": "allow", "grep": "allow", "read": "allow", "write": "deny", "edit": "deny", "shell": "deny", "web": "deny"},
+        {"glob": "allow", "grep": "allow", "read": "allow", "write": "deny", "edit": "deny", "shell": "deny", "web": "deny", "fetch": "deny"},
     ),
     PermissionMode.BYPASS: (
         None,
-        {"glob": "allow", "grep": "allow", "read": "allow", "write": "allow", "edit": "allow", "shell": "allow", "web": "allow"},
+        {"glob": "allow", "grep": "allow", "read": "allow", "write": "allow", "edit": "allow", "shell": "allow", "web": "allow", "fetch": "allow"},
     ),
 }
 

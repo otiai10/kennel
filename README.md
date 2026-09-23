@@ -120,6 +120,7 @@ kennel -p "Read the README and explain this project"   # one-shot
 | `--allow-write` | `write` and `edit` run without asking (= `--permission-mode accept-edits`) |
 | `--allow-shell` | `shell` runs without asking (see Security) |
 | `--allow-web` | enable the `web` tool (asks; needs a configured search provider, see [Web search](#web-search-off-by-default-no-default-service)) |
+| `--allow-fetch` | enable the `fetch` tool (asks, per host; see [Fetch](#fetch-off-by-default-public-addresses-only)) |
 | `--non-interactive` | never prompt; anything that would ask is denied (= `--permission-mode dont-ask`) |
 | `--instructions TEXT\|@FILE` | append text (or a file's contents) to the default instructions |
 | `--system-prompt TEXT\|@FILE` | replace the default instructions entirely (or a file's contents) |
@@ -196,13 +197,13 @@ kennel ~/meetings -p "extract the decisions from the latest transcript" --json-s
 ```
 
 The three older flags are sugar for a mode, so `--permission-mode` cannot be combined with
-them. `bypass` allows everything including `shell` and prints a warning line in the header.
+them. `bypass` allows everything including `shell`, `web` and `fetch`, and prints a warning line in the header.
 What each mode allows, tool by tool, is tabulated in [SECURITY.md](SECURITY.md#what-is-enforced).
 
 `/compact` summarizes the conversation so far and starts a fresh model session seeded with
 that summary (this happens automatically when a turn no longer fits the context window;
 `/compact` lets you do it on your own terms). `/permissions` alone prints the decision
-(`allow`/`ask`/`deny`) and session grant for every enabled tool; `/permissions shell allow`
+(`allow`/`ask`/`deny`) and session grant for every enabled tool (for `fetch`, the hosts granted); `/permissions shell allow`
 changes a tool's decision for the rest of the session (not written back to `kennel.json`).
 
 Every tool call is shown as one line (`● Read transcripts/2026-09-16.txt [1-50]`). Mutations
@@ -713,6 +714,44 @@ register_search_provider(SearchSpec(
 `Agent(".", tools=["read", WebSearchTool(MySearch(token))])` (from `kennel.tools.web`); an
 instance given that way wins over the config.
 
+### Fetch (off by default, public addresses only)
+
+`fetch` reads one web page by URL and gives the model its text, so a search result can be
+read and quoted rather than guessed at from its snippet. It is a separate tool from `web`
+with its own permission: `--allow-fetch` enables it and asks before each call (`--allow-web`
+does not enable it). In the SDK, list it and give it a rule, like `web`:
+`Agent(".", tools=[..., "fetch"], permissions={"fetch": "ask"})`; listed without a rule it is
+denied in the default mode.
+
+- **Destinations.** Only `http` and `https`. Every address the host name resolves to must be
+  public: a loopback, private, link-local, multicast, reserved or unspecified address (an
+  IPv4-mapped IPv6 one included) refuses the request before anything is sent. The connection
+  goes to the address that was checked, so the name is not looked up again; `Host`, SNI and
+  certificate verification use the name. Nothing in `kennel.json` or on the command line lifts
+  this; an application that means to reach its own network builds
+  `FetchTool(allow_private_addresses=True)` (from `kennel.tools.fetch`) and passes it in `tools`.
+- **Permission per host.** A rule's specifier is matched against the normalised host name only
+  (lower case, no trailing dot, IDNA): `"fetch(*.python.org)": "allow"` covers
+  `https://docs.python.org/...` but not `https://python.org/` or
+  `https://evil.example/?x=docs.python.org`. "Allow for this session" remembers the host too, so
+  another host is asked about again.
+- **Redirects.** Followed on the same host and port (and from `http` to `https` on the default
+  ports), at most 5 times, each hop checked again. A redirect elsewhere, or from `https` to
+  `http`, is not followed: the model is told where it points and has to call `fetch` again, which
+  goes through the permission check for that host.
+- **What comes back.** HTML is reduced to its text (no script or style), other `text/*` and JSON
+  as they are; any other type, or a compressed body, is an error. A body over 2 MB stops being
+  read, and the whole request, redirects included, has a 15 s deadline (`FetchTool(timeout=...,
+  max_bytes=...)`). `Ctrl-C` (`Session.interrupt()`) stops it at any stage; interrupted before the
+  request went out, nothing is sent.
+- **What is recorded.** The approval prompt shows the whole URL. Events and the session log show
+  it without the query and the fragment, and the metadata
+  (`{"host", "status", "bytes", "content_type"}`), never the page.
+
+A fetched page is untrusted input to the model: it can contain instructions written to steer the
+agent (prompt injection). Keep `fetch` on `ask` for hosts you have not chosen, and do not allow it
+together with `shell` or `write` without looking at each call.
+
 ## Configuration
 
 Precedence: CLI flags > `Agent(...)` arguments > `./kennel.json` > `~/.config/kennel/settings.json` > defaults.
@@ -765,6 +804,8 @@ In the default configuration:
 - local file contents are never sent over the network;
 - the `web` tool is disabled, and no search service is chosen: web search needs both
   `--allow-web` and a `search_provider`;
+- the `fetch` tool is disabled: it needs `--allow-fetch` (or an explicit rule in the SDK), and
+  even then it only reaches public addresses;
 - no telemetry is collected and no Kennel backend is involved.
 
 `mode: local` in the CLI header reflects the model provider's declaration. A future provider

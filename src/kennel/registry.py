@@ -102,6 +102,7 @@ def _web_tool(config: KennelConfig) -> Tool:
 
 def _builtin_registry() -> ToolRegistry:
     from .tools.edit import EditTool
+    from .tools.fetch import FetchTool
     from .tools.glob import GlobTool
     from .tools.grep import GrepTool
     from .tools.read import ReadTool
@@ -116,6 +117,7 @@ def _builtin_registry() -> ToolRegistry:
     registry.register("edit", EditTool)
     registry.register("shell", ShellTool)
     registry.register("web", _web_tool, configured=True)
+    registry.register("fetch", FetchTool)  # never from the config: no way to lift its address check there
     return registry
 
 

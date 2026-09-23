@@ -18,7 +18,7 @@ Application (CLI / custom Python app)
                       |                    \
                       v                     v
                ModelProvider           Tools (glob grep read
-               AppleProvider            write edit shell web)
+               AppleProvider            write edit shell web fetch)
                LlamaServerProvider
                LlamaCppProvider
                MockProvider
@@ -168,8 +168,26 @@ a tool happens only in `ToolRegistry`, whose `web` factory is registered `config
 receives the effective config; an explicit `WebSearchTool(provider)` instance is used as given.
 
 The built-in providers (`searxng`, `brave`) only build a request and parse the answer. The
-HTTP GET is `kennel.search.http.http_get`: `http.client` on a worker thread, a deadline for the
-whole request (not only per socket operation), a socket shutdown when the awaiting task is
-cancelled (`Session.interrupt()`), and a byte limit at which reading stops. `llama_server.py`
-has its own streaming client; the two were not merged because one streams SSE and the other
-reads a bounded body.
+HTTP GET is `kennel.search.http.http_get`, a thin wrapper over `kennel._http.bounded_request`:
+`http.client` on a worker thread, a deadline for the whole request (not only per socket
+operation), a socket shutdown when the awaiting task is cancelled (`Session.interrupt()`), and
+a byte limit at which reading stops. `llama_server.py` has its own streaming client; the two
+were not merged because one streams SSE and the other reads a bounded body.
+
+## Fetch
+
+The `fetch` tool (`kennel.tools.fetch`) uses the same `bounded_request`, with its own way of
+opening the connection: on the worker thread it resolves the name, refuses the request if any
+address is not global, and connects to a checked address itself (non-blocking, polling the
+cancel token every 50 ms), wrapping TLS with the original name for SNI and certificate checks;
+`http.client` gets the connected socket and never resolves the name again. `getaddrinfo`
+cannot be interrupted, so a cancel during resolution abandons the worker, which exits without
+connecting when the lookup returns; the check before sending and the cancel take the same
+lock, so nothing is sent after a cancel. Redirects are followed by the tool, one
+`bounded_request` per hop, within one overall deadline.
+
+Rules match the normalised host (`FetchTool.match_rule`), and "allow for this session" is
+remembered per host through `Tool.session_scope`: `PermissionManager` stores grants as
+`(tool name, scope)`, the runner passes the scope with the `PermissionRequest` and to
+`PermissionManager.resolve` for a hook's `Allow(remember="session")`. The default scope
+`None` is the whole tool, which every other tool keeps.

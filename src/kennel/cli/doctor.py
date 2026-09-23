@@ -29,12 +29,13 @@ from ..errors import ConfigurationError, ProviderError
 from ..events import state_dir
 from ..permissions import DEFAULT_MODE, PermissionMode
 from ..providers import registry as provider_registry
-from ..providers.registry import DEFAULT_PROVIDER
 from ..registry import DEFAULT_TOOLS
 from ..search import registry as search_registry
 from ..workspace import Workspace, WorkspaceError
 
 __all__ = ["Check", "render_json", "render_text", "run_checks"]
+
+CONFIG_UNREADABLE = "provider skipped: the config could not be read (see effective config)"
 
 
 def _check_python() -> Check:
@@ -105,14 +106,12 @@ def _provider_checks(name: str, options: dict[str, Any]) -> list[Check]:
     return checks
 
 
-def _search_checks(cfg: KennelConfig | None) -> list[Check]:
+def _search_checks(cfg: KennelConfig) -> list[Check]:
     """The configured search provider: where it sends queries, its keys (set or not), reachability.
 
     Reachability is up to the provider: SearXNG sends one probe query (and says so), Brave
     only opens a connection. Key values are never shown.
     """
-    if cfg is None:
-        return []
     name = cfg.search_provider
     if name is None:
         return [Check("web search", True, "web search: not configured (no search_provider)")]
@@ -214,17 +213,22 @@ def run_checks(
 ) -> list[Check]:
     """Run every doctor check and return them in display order.
 
-    ``provider_name`` is ``--provider``; ``None`` falls back to the ``provider`` config key
-    (and to the default provider when the config cannot be read). ``user_config`` defaults to
+    ``provider_name`` is ``--provider``; ``None`` falls back to the ``provider`` config key.
+    When the config cannot be read, the provider and web search checks do not run at all,
+    with or without ``--provider``: their options (``base_url``, ...) live in that config, and
+    probing with guessed ones could report a different, unrelated server as healthy. One
+    skipped ``provider`` row points at the ``effective config`` error instead. ``user_config`` defaults to
     the real ``~/.config/kennel/settings.json`` (matching :func:`kennel.config.load_config`);
     tests override it to avoid depending on the machine's actual home directory.
     """
     cfg, config_error = _load_config(workspace_arg, user_config)
-    name = provider_name or (cfg.provider if cfg is not None else DEFAULT_PROVIDER)
-    options = cfg.providers.get(name, {}) if cfg is not None else {}
     checks = [_check_python(), _check_platform()]
-    checks.extend(_provider_checks(name, options))
-    checks.extend(_search_checks(cfg))
+    if cfg is None:
+        checks.append(Check("provider", False, CONFIG_UNREADABLE, hint="fix the config; the provider is checked once it can be read"))
+    else:
+        name = provider_name or cfg.provider
+        checks.extend(_provider_checks(name, cfg.providers.get(name, {})))
+        checks.extend(_search_checks(cfg))
     checks.append(_check_xcode())
     if user_config is not None:
         checks.append(_check_config_file(user_config, "user config"))
