@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -50,6 +53,11 @@ class FakeConfig:
     n_ctx: int | None = 32768
     model_name: str | None = "fake/Model-GGUF:Q4_K_M"
     replies: list[Reply] = field(default_factory=lambda: [Reply()])
+    api_key: str | None = None  # like llama-server --api-key: every route but /health needs it
+
+
+#: What llama-server --api-key answers without a key or with a wrong one (measured 2026-09-23).
+UNAUTHORIZED_BODY = {"error": {"message": "Invalid API Key", "type": "authentication_error", "code": 401}}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -72,7 +80,19 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _authorized(self) -> bool:
+        """Record the Authorization header, and answer 401 the way llama-server does."""
+        header = self.headers.get("Authorization")
+        self.server.auth.append((self.command, self.path, header))  # type: ignore[attr-defined]
+        key = self.config.api_key
+        if key is None or self.path.endswith("/health") or header == f"Bearer {key}":
+            return True
+        self._json(UNAUTHORIZED_BODY, 401)
+        return False
+
     def do_GET(self) -> None:
+        if not self._authorized():
+            return
         settings: dict[str, Any] = {}
         if self.config.n_ctx is not None:
             settings["n_ctx"] = self.config.n_ctx
@@ -86,7 +106,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
-        self.server.requests.append(json.loads(self.rfile.read(length) or b"{}"))  # type: ignore[attr-defined]
+        body = self.rfile.read(length)
+        if not self._authorized():
+            return
+        self.server.requests.append(json.loads(body or b"{}"))  # type: ignore[attr-defined]
         replies = self.config.replies
         reply = replies.pop(0) if len(replies) > 1 else replies[0]
         if reply.status != 200:
@@ -112,6 +135,7 @@ def fake_server():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     server.config = FakeConfig()  # type: ignore[attr-defined]
     server.requests = []  # type: ignore[attr-defined]
+    server.auth = []  # type: ignore[attr-defined]  # (method, path, Authorization header)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -384,3 +408,193 @@ def test_doctor_checks_explain_an_unreachable_server():
     checks = llama_server_doctor_checks(base_url=f"http://127.0.0.1:{closed_port()}", timeout=2.0)
     assert [check.ok for check in checks] == [False, False]
     assert "llama-server" in (checks[0].hint or "")
+
+
+# -- the API key (issue #74) ---------------------------------------------------
+
+KEY = "sk-test-0123456789abcdef"
+KEY_ENV = "KENNEL_LLAMA_SERVER_API_KEY"
+
+
+@pytest.fixture
+def no_key_env(monkeypatch):
+    """The developer's own key variables must not leak into these tests."""
+    for name in (KEY_ENV, "LLAMA_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    return monkeypatch
+
+
+def llama_agent(ws: Path, server: ThreadingHTTPServer, **options: Any) -> Agent:
+    """``Agent(provider="llama-server")`` configured from kennel.json, as a user would, with the
+    session event log on so that what it records can be checked too."""
+    config = {
+        "provider": "llama-server",
+        "providers": {"llama-server": {"base_url": base_url(server), "timeout": 5.0, **options}},
+        "logging": {"events": True},
+    }
+    (ws / "kennel.json").write_text(json.dumps(config))
+    return Agent(ws, tools=[])
+
+
+async def test_the_key_from_the_environment_goes_on_every_request(fake_server, meeting_ws: Path, no_key_env):
+    """AC-1: /props, /v1/models and the chat request all carry the Bearer header."""
+    no_key_env.setenv(KEY_ENV, KEY)
+    fake_server.config.api_key = KEY
+    fake_server.config.replies = [answer("keyed")]
+    result = await llama_agent(meeting_ws, fake_server).run("hi")
+    assert result.text == "keyed"
+    seen = {(method, path.split("?")[0]): header for method, path, header in fake_server.auth}
+    assert set(seen) == {("GET", "/props"), ("GET", "/v1/models"), ("POST", "/v1/chat/completions")}
+    assert set(seen.values()) == {f"Bearer {KEY}"}
+
+
+async def test_the_config_can_name_another_variable(fake_server, meeting_ws: Path, no_key_env):
+    """AC-1: secrets.api_key names the variable (here llama-server's own LLAMA_API_KEY)."""
+    no_key_env.setenv("LLAMA_API_KEY", KEY)
+    fake_server.config.api_key = KEY
+    fake_server.config.replies = [answer("keyed")]
+    agent = llama_agent(meeting_ws, fake_server, secrets={"api_key": "LLAMA_API_KEY"})
+    assert (await agent.run("hi")).text == "keyed"
+    assert {header for _, _, header in fake_server.auth} == {f"Bearer {KEY}"}
+
+
+async def test_without_a_key_no_header_is_sent(fake_server, meeting_ws: Path, no_key_env):
+    """AC-2: nothing set, nothing sent, and an open server works as before."""
+    fake_server.config.replies = [answer("open")]
+    assert (await llama_agent(meeting_ws, fake_server).run("hi")).text == "open"
+    assert fake_server.auth and {header for _, _, header in fake_server.auth} == {None}
+
+
+@pytest.mark.parametrize(
+    ("env_key", "expected"),
+    [(None, "no API key was sent"), ("sk-wrong-key", "rejected the API key that was sent")],
+)
+async def test_a_401_is_a_fixed_provider_error(fake_server, meeting_ws: Path, state_dir: Path, no_key_env, env_key, expected):
+    """AC-3: status 401, says whether a key went out and where to set it; no body, no key anywhere."""
+    if env_key:
+        no_key_env.setenv(KEY_ENV, env_key)
+    fake_server.config.api_key = KEY
+    agent = llama_agent(meeting_ws, fake_server)
+    events: list[Any] = []
+    agent.events.subscribe(events.append)
+    with pytest.raises(ProviderError) as info:
+        await agent.run("hi")
+    error = info.value
+    assert error.status == 401 and error.provider_error is None
+    assert expected in str(error)
+    assert "providers.llama-server.secrets.api_key" in str(error) and KEY_ENV in str(error)
+    logs = "".join(path.read_text() for path in (state_dir / "sessions").glob("*.jsonl"))
+    assert "session.failed" in logs and "session.failed" in repr(events)
+    recorded = [str(error), repr(events), logs]
+    for secret in ("Invalid API Key", "authentication_error", KEY, "sk-wrong-key"):
+        assert all(secret not in text for text in recorded), secret
+
+
+async def test_a_401_during_a_turn_is_the_same_error(fake_server, meeting_ws: Path, state_dir: Path, no_key_env):
+    """AC-3: a probe that passed and a chat request refused (the key rotated) fail the turn alike."""
+    no_key_env.setenv(KEY_ENV, KEY)
+    agent = llama_agent(meeting_ws, fake_server)
+    agent.check_availability()
+    fake_server.config.api_key = "sk-rotated"
+    events: list[Any] = []
+    agent.events.subscribe(events.append)
+    with pytest.raises(ProviderError) as info:
+        await agent.run("hi")
+    assert info.value.status == 401 and "rejected the API key that was sent" in str(info.value)
+    failed = [event for event in events if event.type == "session.failed"]
+    assert failed and failed[0].data["status"] == 401 and failed[0].data["provider_error"] is None
+    logs = "".join(path.read_text() for path in (state_dir / "sessions").glob("*.jsonl"))
+    assert "session.failed" in logs
+    for secret in ("Invalid API Key", KEY, "sk-rotated"):
+        assert secret not in repr(events) and secret not in logs
+
+
+def test_the_key_is_in_no_repr(no_key_env):
+    """Condition from review: the key never shows up in a repr of what holds it."""
+    provider = LlamaServerProvider(base_url="http://127.0.0.1:9", api_key=KEY)
+    assert KEY not in repr(provider) and KEY not in repr(provider._endpoint)
+    assert KEY not in repr(vars(provider))
+
+
+def test_the_cli_startup_reports_the_fixed_401_text(fake_server, meeting_ws: Path, no_key_env):
+    """The CLI probes before the first turn (cli/main.py) and shows the same message."""
+    no_key_env.setenv(KEY_ENV, "sk-wrong-key")
+    fake_server.config.api_key = KEY
+    config = {"providers": {"llama-server": {"base_url": base_url(fake_server), "timeout": 5.0}}}
+    (meeting_ws / "kennel.json").write_text(json.dumps(config))
+    proc = subprocess.run(
+        [sys.executable, "-m", "kennel.cli.main", str(meeting_ws), "--provider", "llama-server", "-p", "hi"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "NO_COLOR": "1"},
+        timeout=60,
+    )
+    assert proc.returncode != 0
+    assert "rejected the API key that was sent (HTTP 401)" in proc.stderr
+    assert "providers.llama-server.secrets.api_key" in proc.stderr
+    for secret in ("Invalid API Key", KEY, "sk-wrong-key"):
+        assert secret not in proc.stdout + proc.stderr
+
+
+# -- kennel doctor and the key (issue #74, AC-5) ---------------------------------
+
+
+def doctor_for(ws: Path, server: ThreadingHTTPServer | None = None, **options: Any):
+    from kennel.cli.doctor import render_json, render_text, run_checks
+
+    if server is not None:
+        options = {"base_url": base_url(server), "timeout": 5.0, **options}
+    (ws / "kennel.json").write_text(json.dumps({"providers": {"llama-server": options}}))
+    checks = run_checks(str(ws), "llama-server", user_config=None)
+    return checks, render_text(checks) + render_json(checks, all(c.ok for c in checks))
+
+
+def test_doctor_names_the_variable_and_whether_it_is_set(fake_server, meeting_ws: Path, no_key_env):
+    no_key_env.setenv(KEY_ENV, KEY)
+    fake_server.config.api_key = KEY
+    checks, output = doctor_for(meeting_ws, fake_server)
+    key = next(c for c in checks if c.name == "provider key api_key")
+    assert key.ok and key.detail == f"llama-server api_key: {KEY_ENV} set"
+    assert next(c for c in checks if c.name == "llama-server").ok  # asked with the key
+    assert KEY not in output
+
+
+def test_doctor_says_an_unset_key_is_optional(fake_server, meeting_ws: Path, no_key_env):
+    checks, _ = doctor_for(meeting_ws, fake_server)
+    key = next(c for c in checks if c.name == "provider key api_key")
+    assert key.ok and key.detail == f"llama-server api_key: {KEY_ENV} not set (optional)"
+
+
+@pytest.mark.parametrize("env_key", [None, "sk-wrong-key"])
+def test_doctor_hints_the_variable_actually_read_on_a_401(fake_server, meeting_ws: Path, no_key_env, env_key):
+    if env_key:
+        no_key_env.setenv("LLAMA_API_KEY", env_key)
+    fake_server.config.api_key = KEY
+    checks, output = doctor_for(meeting_ws, fake_server, secrets={"api_key": "LLAMA_API_KEY"})
+    server = next(c for c in checks if c.name == "llama-server")
+    model = next(c for c in checks if c.name == "model")
+    assert not server.ok and "HTTP 401" in server.detail
+    assert "LLAMA_API_KEY" in (server.hint or "")
+    assert not model.ok and model.detail.startswith("skipped:")
+    for secret in ("Invalid API Key", KEY, "sk-wrong-key"):
+        assert secret not in output
+
+
+def test_doctor_warns_when_the_key_goes_over_plain_http_to_another_host(meeting_ws: Path, no_key_env):
+    """Built without I/O: the warning comes before the (failing) probe of a closed port."""
+    no_key_env.setenv(KEY_ENV, KEY)
+    checks, output = doctor_for(meeting_ws, base_url="http://192.0.2.1:9", timeout=0.2)
+    warning = next(c for c in checks if c.name == "llama-server key transport")
+    assert warning.ok and warning.detail.startswith("warning:") and "unencrypted" in warning.detail
+    assert KEY not in output
+
+
+@pytest.mark.parametrize(
+    ("url", "env_key"),
+    [("http://127.0.0.1:9", KEY), ("https://192.0.2.1:9", KEY), ("http://192.0.2.1:9", None)],
+)
+def test_no_plain_http_warning_when_the_key_stays_safe(url: str, env_key: str | None, meeting_ws: Path, no_key_env):
+    if env_key:
+        no_key_env.setenv(KEY_ENV, env_key)
+    checks, _ = doctor_for(meeting_ws, base_url=url, timeout=0.2)
+    assert all(c.name != "llama-server key transport" for c in checks)
