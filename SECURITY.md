@@ -59,11 +59,21 @@ bypass this file's guarantees. That is the same trust level as the application's
 do not load hooks you would not paste into your own `main()`.
 
 **Bounded execution.** Tool output is capped (64 KiB by default), reads are line-range
-bounded, `shell` has a timeout and runs without stdin, and each turn has a tool call
-budget plus repeated-call detection.
+bounded, `shell` has a timeout and runs without stdin, a web search has a deadline for the
+whole request and stops reading a response past `max_response_bytes` (1 MB by default), and
+each turn has a tool call budget plus repeated-call detection.
 
 **Local by default.** No network access is made by Kennel core. The `web` tool is disabled
-unless explicitly enabled and given a search provider.
+unless explicitly enabled (`--allow-web`, which asks before every search) and given a search
+provider; no search provider is chosen by default. Search results reach the model only:
+events and the session log record how many results came back, not their text.
+
+**Keys stay in the environment.** A search provider's API key is read from an environment
+variable only; a key written into `kennel.json` or the user settings file is refused, because
+the agent can read the workspace's `kennel.json` with its own `read` tool and a prompt
+injection could then send the key out inside a query. Key values never appear in errors,
+events, `kennel doctor` or `/status`, and they are not passed to `shell` (whose environment
+is an allowlist).
 
 ## What is not enforced
 

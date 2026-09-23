@@ -97,8 +97,9 @@ kennel doctor
 ```
 
 This checks the Python version, platform, the selected provider (for `apple`: the `apple_fm_sdk`
-install and model availability), Xcode, user/project config files, the workspace, and prints the
-effective tools/permissions.
+install and model availability), the web search service if one is configured (see
+[Web search](#web-search-off-by-default-no-default-service)), Xcode, user/project config files,
+the workspace, and prints the effective tools/permissions.
 Failing checks show `✗` with a reason and, where there is one, a fix; add `--json` for a
 machine-readable report (handy when filing a bug: paste the output of `kennel doctor --json`).
 Exit code is `0` when everything checks out, `1` otherwise.
@@ -118,7 +119,7 @@ kennel -p "Read the README and explain this project"   # one-shot
 | `--read-only` | only `glob`, `grep`, `read` are available (= `--permission-mode read-only`) |
 | `--allow-write` | `write` and `edit` run without asking (= `--permission-mode accept-edits`) |
 | `--allow-shell` | `shell` runs without asking (see Security) |
-| `--allow-web` | enable the `web` tool (asks; needs a configured search provider) |
+| `--allow-web` | enable the `web` tool (asks; needs a configured search provider, see [Web search](#web-search-off-by-default-no-default-service)) |
 | `--non-interactive` | never prompt; anything that would ask is denied (= `--permission-mode dont-ask`) |
 | `--instructions TEXT\|@FILE` | append text (or a file's contents) to the default instructions |
 | `--system-prompt TEXT\|@FILE` | replace the default instructions entirely (or a file's contents) |
@@ -607,6 +608,94 @@ result.text                       # the same document as JSON
 are not in the transcript stay `None`. `ProviderSession.respond_structured` remains the
 provider-level primitive underneath.
 
+### Web search (off by default, no default service)
+
+The `web` tool is off unless you pass `--allow-web` (SDK: `tools=[..., "web"]`), and even then
+it only works once you choose a search service; Kennel does not pick one for you. Every search
+sends the query off this Mac to that service. Two services are built in:
+
+| Service | What you provide | Where queries go |
+| --- | --- | --- |
+| `searxng` | `url` of a SearXNG you run, with `json` in `search.formats` of its `settings.yml` | your instance, which relays them to upstream engines |
+| `brave` | an API key in `BRAVE_API_KEY` ([Brave Search API](https://brave.com/search/api/); a card is required) | `api.search.brave.com` |
+
+With `brave`, your key and your searches are under Brave's API terms; Kennel keeps no search
+results (see below), and any attribution Brave asks of you is yours to give.
+
+```json
+{
+  "search_provider": "searxng",
+  "search_providers": {
+    "searxng": { "url": "http://localhost:8888" },
+    "brave": { "secrets": { "api_key": "MY_BRAVE_KEY" } }
+  }
+}
+```
+
+API keys are read from environment variables only. A config file may name a different
+variable (`secrets.api_key` above), but a key written into `kennel.json` or `settings.json` is
+refused: the agent can read the workspace's `kennel.json` with its own `read` tool. Both
+services also take `timeout` (seconds, default 10) and `max_response_bytes` (default
+1000000); a response larger than that is not read to the end.
+
+The header shows where searches go, on a line of its own; `mode:` stays the model's:
+
+```text
+$ kennel ~/meetings --allow-web
+
+Kennel v0.1.0
+workspace: /Users/me/meetings
+provider: apple
+model: Apple SystemLanguageModel
+mode: local
+permissions: default
+tools: glob, grep, read, write (ask), edit (ask), shell (ask), web (ask)
+web search: searxng → localhost:8888 → upstream engines (remote)
+```
+
+`Session.status()["web"]` (and `/status`) carries the same text. `kennel doctor` reports the
+service, its destination and mode, whether each key's variable is set (never its value), and
+whether the service is reachable: for SearXNG it sends one probe query, which goes through
+your instance to its upstream engines; for Brave it only opens a connection. Events, the
+session log and `--output-format` record how many results a search returned
+(`{"provider": "searxng", "returned": 5}`), never their text; the results themselves go to
+the model only.
+
+A search that could not be carried out fails with `SearchError`, whose message tells the model
+whether trying again can help (a timeout) or not (a rejected key, a spent quota, SearXNG's
+JSON output disabled, blocked upstream engines), and what to fix. An empty answer means the
+service looked and found nothing.
+
+Any other search service plugs in the same way. A provider has an `info` and an async
+`search`; register it, and `search_provider` can name it:
+
+```python
+from kennel import SearchError, SearchProviderInfo, SearchResult, SearchSpec, Secret, register_search_provider
+
+class MySearch:
+    def __init__(self, token: str, base_url: str = "https://search.example"):
+        self.token, self.base_url = token, base_url
+        # "remote" unless the query never leaves this machine (an offline index)
+        self.info = SearchProviderInfo("mysearch", "search.example", "remote")
+
+    async def search(self, query: str, limit: int = 5) -> list[SearchResult]:
+        hits = await my_client(self.base_url, self.token, query, limit)   # your HTTP call
+        if hits is None:
+            raise SearchError("mysearch is down", retryable=True)        # could not look
+        return [SearchResult(h.title, h.url, h.snippet) for h in hits]    # [] = nothing found
+
+register_search_provider(SearchSpec(
+    "mysearch",
+    lambda **options: MySearch(**options),
+    secrets={"token": Secret("MYSEARCH_TOKEN")},   # read from the environment, passed as token=
+))
+```
+
+`base_url` then comes from `search_providers.mysearch` in the config and `token` from
+`MYSEARCH_TOKEN`. An application can also skip the registry and pass the tool itself:
+`Agent(".", tools=["read", WebSearchTool(MySearch(token))])` (from `kennel.tools.web`); an
+instance given that way wins over the config.
+
 ## Configuration
 
 Precedence: CLI flags > `Agent(...)` arguments > `./kennel.json` > `~/.config/kennel/settings.json` > defaults.
@@ -628,6 +717,8 @@ approved from the prompt, planned for a later version). All keys are optional.
     "llama-server": { "base_url": "http://127.0.0.1:8080" },
     "llama-cpp": { "model_path": "~/models/Qwen3-4B-Q4_K_M.gguf", "n_ctx": 16384 }
   },
+  "search_provider": "searxng",
+  "search_providers": { "searxng": { "url": "http://localhost:8888" } },
   "permission_mode": "default",
   "logging": { "events": true },
   "permissions": {
@@ -655,12 +746,15 @@ In the default configuration:
 - `llama-cpp` runs the model inside Kennel's own process, so it opens no port at all and is
   `local` unconditionally; no provider downloads a model;
 - local file contents are never sent over the network;
-- the `web` tool is disabled;
+- the `web` tool is disabled, and no search service is chosen: web search needs both
+  `--allow-web` and a `search_provider`;
 - no telemetry is collected and no Kennel backend is involved.
 
-`mode: local` in the CLI header reflects the provider's declaration. A future provider
-that sends data off the device (Private Cloud Compute, a web search provider) must report a
-different mode so the UI can show it.
+`mode: local` in the CLI header reflects the model provider's declaration. A future provider
+that sends data off the device (Private Cloud Compute) must report a different mode so the
+UI can show it. A search service declares its own mode (`SearchProviderInfo.mode`, `remote`
+for both built-in services), shown on the separate `web search:` line and in
+`Session.status()["web"]`.
 
 ## Security limitations
 
@@ -680,6 +774,7 @@ pytest                                   # unit, provider (MockProvider) and CLI
 KENNEL_APPLE_TESTS=1 pytest -m apple     # Apple integration tests, on a capable Mac only
 KENNEL_LLAMA_SERVER=http://127.0.0.1:8080 pytest -m llama   # against a llama-server you started
 KENNEL_LLAMA_CPP_MODEL=~/models/qwen.gguf pytest -m llama   # against a GGUF in this process
+KENNEL_SEARXNG_URL=http://localhost:8888 pytest -m search   # a SearXNG you run (KENNEL_BRAVE_TESTS=1 + BRAVE_API_KEY: Brave)
 ```
 
 Repository layout:
@@ -690,6 +785,7 @@ src/kennel/
   hooks.py                           before_tool / after_tool / before_prompt callbacks
   workspace.py permissions.py rules.py  path resolver, permission manager, glob/rule syntax
   registry.py tools/                  tool interface and built-ins (glob grep read write edit shell web)
+  search/ credentials.py              search providers (registry, SearXNG, Brave, bounded HTTP), env-only secrets
   providers/                          provider abstraction, registry (name -> provider), AppleProvider,
                                       LlamaServerProvider, the shared chat loop, MockProvider
   context.py config.py events.py      chunking/compaction, JSON config, event bus
@@ -709,7 +805,8 @@ providers for a larger context window (`llama-server` over HTTP, `llama-cpp` in 
 process), and the observability work that fills out this release: a per-session JSONL event
 log, tool result sizes and remaining context shown without `--verbose`, failed turns kept in
 the history with the facts of the failure, and a tool result too big for the window withheld
-instead of failing the turn. Not yet: web search provider, persistent sessions, MCP,
+instead of failing the turn, and opt-in web search through SearXNG or Brave. Not yet:
+fetching a web page's contents, persistent sessions, MCP,
 subagents, sandboxed shell. Design principles live in
 [docs/constitution.md](docs/constitution.md); the comparison with Claude Code that drove the
 current roadmap is in `docs/history/`.
