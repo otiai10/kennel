@@ -21,13 +21,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..credentials import (
-    SECRETS_KEY,
-    Secret,
-    check_no_secret_values,
-    resolve_secrets,
-    variable_names,
-)
+from .. import credentials
+from ..credentials import Secret
 from ..diagnostics import Check
 from ..errors import ConfigurationError
 from .base import SearchProvider
@@ -111,9 +106,7 @@ def check_options(name: str, options: Mapping[str, Any]) -> None:
     """Refuse a declared secret written as a value, or a ``secrets`` entry that is not a
     variable name. A no-op for names not registered yet (:func:`create` checks them)."""
     if name in _SPECS:
-        declared = _SPECS[name].secrets
-        check_no_secret_values(declared, options, where=where(name))
-        variable_names(declared, options.get(SECRETS_KEY), where=where(name))
+        credentials.check_options(_SPECS[name].secrets, options, where=where(name))
 
 
 def create(name: str, options: Mapping[str, Any] | None = None) -> SearchProvider:
@@ -124,11 +117,8 @@ def create(name: str, options: Mapping[str, Any] | None = None) -> SearchProvide
     the variable, never a value.
     """
     search_spec = spec(name)
-    opts = dict(options or {})
-    overrides = opts.pop(SECRETS_KEY, None)
-    check_no_secret_values(search_spec.secrets, opts, where=where(name))
-    secrets = resolve_secrets(search_spec.secrets, overrides, where=where(name))
+    kwargs = credentials.with_secrets(search_spec.secrets, options, where=where(name))
     try:
-        return search_spec.factory(**opts, **secrets)
+        return search_spec.factory(**kwargs)
     except TypeError as exc:
         raise ConfigurationError(f"search provider {name!r}: {exc}") from exc

@@ -13,8 +13,8 @@ the agent's own ``read`` tool, so a key kept there could be read out by a prompt
 and sent off in a query.
 
 Nothing here ever puts a secret's *value* into a message: errors and diagnostics name the
-variable only. The module knows nothing about search, so model providers can use the same
-declarations later.
+variable only. The module knows nothing about search or models: the search registry and the
+model provider registry both go through :func:`check_options` and :func:`with_secrets`.
 """
 
 from __future__ import annotations
@@ -33,9 +33,11 @@ __all__ = [
     "Secret",
     "SecretStatus",
     "check_no_secret_values",
+    "check_options",
     "resolve_secrets",
     "secret_status",
     "variable_names",
+    "with_secrets",
 ]
 
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -135,3 +137,25 @@ def secret_status(
         SecretStatus(param, name, bool(env.get(name)), declared[param].required)
         for param, name in variable_names(declared, overrides, where=where).items()
     ]
+
+
+def check_options(declared: Mapping[str, Secret], options: Mapping[str, Any], *, where: str) -> None:
+    """Refuse a declared secret written as a value, or a ``secrets`` entry that is not a
+    declared secret's variable name. Reads no environment variable."""
+    check_no_secret_values(declared, options, where=where)
+    variable_names(declared, options.get(SECRETS_KEY), where=where)
+
+
+def with_secrets(
+    declared: Mapping[str, Secret],
+    options: Mapping[str, Any] | None,
+    *,
+    where: str,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """The factory's keyword arguments: ``options`` without ``secrets``, plus every declared
+    secret read from the environment (see :func:`resolve_secrets`)."""
+    opts = dict(options or {})
+    overrides = opts.pop(SECRETS_KEY, None)
+    check_no_secret_values(declared, opts, where=where)
+    return {**opts, **resolve_secrets(declared, overrides, where=where, environ=environ)}
