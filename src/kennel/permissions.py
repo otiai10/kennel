@@ -60,6 +60,7 @@ BUILTIN_KINDS: dict[str, PermissionKind] = {
     "edit": PermissionKind.WRITE,
     "shell": PermissionKind.SHELL,
     "web": PermissionKind.WEB,
+    "fetch": PermissionKind.WEB,
 }
 
 #: Tool names a read-only agent is limited to. ``registry.READ_ONLY_TOOLS`` is this

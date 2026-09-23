@@ -50,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-write", action="store_true", help="allow write and edit without asking (= --permission-mode accept-edits)")
     p.add_argument("--allow-shell", action="store_true", help="allow shell without asking (weakens the workspace boundary)")
     p.add_argument("--allow-web", action="store_true", help="enable the web tool (asks; needs a configured search provider)")
+    p.add_argument("--allow-fetch", action="store_true", help="enable the fetch tool: read a web page by URL (asks, per host)")
     p.add_argument("--non-interactive", action="store_true", help="never prompt; permissions that would ask are denied (= --permission-mode dont-ask)")
     p.add_argument(
         "--instructions",
@@ -207,10 +208,11 @@ def build_agent(args: argparse.Namespace, prompter: ConsolePrompter | None) -> A
     permissions: dict[str, str] = {}
     if args.allow_shell:
         permissions["shell"] = "allow"
-    if args.allow_web:
-        tools.append("web")
-        if mode is not PermissionMode.BYPASS:
-            permissions["web"] = "ask"
+    for flag, name in (("allow_web", "web"), ("allow_fetch", "fetch")):  # independent of each other
+        if getattr(args, flag):
+            tools.append(name)
+            if mode is not PermissionMode.BYPASS:
+                permissions[name] = "ask"
     from ..config import load_config
 
     instructions = _resolve_text_or_file(args.instructions, args.workspace, "--instructions")
@@ -418,7 +420,7 @@ def _usage_lines(session: Session) -> str:
     return f"window: {window}\nused: {used}\ncontext: {ratio}\nturns: {u.turns}\ncompactions: {u.compactions}\n"
 
 
-BYPASS_WARNING = "! permission mode bypass: every tool runs without asking, including shell and web"
+BYPASS_WARNING = "! permission mode bypass: every tool runs without asking, including shell, web and fetch"
 
 
 def _rule_list(agent: Agent) -> str:
