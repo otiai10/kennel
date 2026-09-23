@@ -670,6 +670,75 @@ async def test_interrupt_is_a_noop_when_no_turn_runs_and_plain_cancel_is_unchang
     session.interrupt()  # the turn is already over
     assert (await session.run("again")).text == "after cancel"
 
+
+# -- stream() + interrupt() regression (#26) ----------------------------------
+#
+# PR #11 (Session.stream()) and PR #15 (Session.interrupt()) were built and merged
+# independently; neither pinned the combined behaviour with a test. #26 fixes that
+# gap. No src/ change is expected here (Issue #26 "## 修正提案": tests only).
+
+
+def _interrupt_from_the_consuming_task(session: Session) -> None:
+    session.interrupt()
+
+
+def _interrupt_from_another_thread(session: Session) -> None:
+    # apple_fm_sdk's tool callbacks run on their own thread (docs/architecture.md
+    # "Threading"); Session.interrupt() documents itself as safe from any thread.
+    thread = threading.Thread(target=session.interrupt)
+    thread.start()
+    thread.join()
+
+
+@pytest.mark.parametrize(
+    "trigger_interrupt",
+    [_interrupt_from_the_consuming_task, _interrupt_from_another_thread],
+    ids=["same-task", "another-thread"],
+)
+async def test_interrupt_during_stream_yields_cancelled_then_raises(meeting_ws, trigger_interrupt):
+    """AC-1: interrupting the run() task backing stream() delivers session.cancelled
+    through the iterator and then raises TurnCancelledError out of the `async for`,
+    without ever yielding session.completed — whether interrupt() is called from the
+    task consuming the iterator or, as an SDK-embedding app's tool callback would, from
+    another thread."""
+    agent, _, _ = slow_agent(meeting_ws, [[ToolCall("slow", {}), Text("never")]])
+    session = agent.new_session()
+    types: list[EventType] = []
+
+    async def consume() -> None:
+        async for event in session.stream("slow one"):
+            types.append(event.type)
+            if event.type == EventType.TOOL_STARTED:
+                trigger_interrupt(session)
+
+    with pytest.raises(TurnCancelledError):
+        await asyncio.wait_for(consume(), 1.0)
+    assert types[-1] == EventType.SESSION_CANCELLED
+    assert EventType.SESSION_COMPLETED not in types
+    await session.close()
+
+
+async def test_session_reusable_after_stream_interrupt(meeting_ws):
+    """AC-1: after a stream() interrupt, the same session accepts a further run()
+    and a further stream() — both start a fresh turn on a new provider session."""
+    agent, provider, _ = slow_agent(
+        meeting_ws, [[ToolCall("slow", {}), Text("never")], "after interrupt (run)", "after interrupt (stream)"]
+    )
+    session = agent.new_session()
+    with pytest.raises(TurnCancelledError):
+        async for event in session.stream("slow one"):
+            if event.type == EventType.TOOL_STARTED:
+                session.interrupt()
+
+    result = await session.run("again via run")
+    assert result.text == "after interrupt (run)" and len(provider.sessions) == 2
+
+    events = [e async for e in session.stream("again via stream")]
+    # same provider session as the "run" turn above: only interrupt() opens a new one
+    assert events[-1].data["text"] == "after interrupt (stream)" and len(provider.sessions) == 2
+    await session.close()
+
+
 # -- context usage ------------------------------------------------------------
 
 
