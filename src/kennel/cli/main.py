@@ -22,6 +22,7 @@ from ..permissions import Decision, PermissionMode
 from ..providers.registry import names as provider_names
 from ..registry import DEFAULT_TOOLS
 from ..session import AgentResult, Session
+from ..sessions import FileSessionStore
 from .output import FORMATS, DocumentOutput, JsonOutput, MachineOutput
 from .renderer import ConsolePrompter, Renderer
 from .terminal import discard_typed_ahead
@@ -90,6 +91,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="do not keep this session's event log (= the \"logging\": {\"events\": false} config key); "
         "the log is a local JSON Lines file under KENNEL_STATE_DIR, ~/.local/state/kennel by default",
     )
+    persist = p.add_mutually_exclusive_group()
+    persist.add_argument(
+        "--persist",
+        dest="persist",
+        action="store_true",
+        default=None,
+        help="save this conversation so --continue / --resume can pick it up (= \"sessions\": {\"persist\": true}); "
+        "the text of prompts and answers is kept in a local file under KENNEL_STATE_DIR",
+    )
+    persist.add_argument(
+        "--no-persist",
+        dest="persist",
+        action="store_false",
+        help="do not save this conversation, whatever the config says",
+    )
+    resume = p.add_mutually_exclusive_group()
+    resume.add_argument(
+        "--continue",
+        dest="continue_session",
+        action="store_true",
+        help="resume the most recently saved conversation of this workspace",
+    )
+    resume.add_argument("--resume", metavar="ID", help="resume the saved conversation ID of this workspace")
     p.add_argument("--version", action="version", version=f"kennel {__version__}")
     return p
 
@@ -229,6 +253,12 @@ def build_agent(args: argparse.Namespace, prompter: ConsolePrompter | None) -> A
         config = config.merged(log_events=False)
     elif config.log_events is None:
         config = config.merged(log_events=True)
+    # Saving the conversation is opt-in (it keeps text, unlike the event log); --persist /
+    # --no-persist win over the config key. Resuming reads a saved conversation even when
+    # saving is off, in which case the resumed session is not written to.
+    persist = config.persist_sessions if args.persist is None else args.persist
+    resuming = args.continue_session or args.resume is not None
+    store = FileSessionStore(args.workspace, persist=persist) if persist or resuming else None
     # The provider is left to Agent, which resolves config.provider through the registry.
     return Agent(
         args.workspace,
@@ -238,7 +268,27 @@ def build_agent(args: argparse.Namespace, prompter: ConsolePrompter | None) -> A
         system_prompt=system_prompt,
         config=config,
         prompter=prompter,
+        session_store=store,
     )
+
+
+def resume_target(agent: Agent, args: argparse.Namespace) -> str | None:
+    """The session id ``--continue`` / ``--resume`` asks for, or ``None`` for a new session."""
+    if args.continue_session:
+        latest = agent.session_store.latest() if agent.session_store is not None else None
+        if latest is None:
+            raise ConfigurationError("--continue: no saved conversation in this workspace")
+        return latest
+    return args.resume
+
+
+def open_session(agent: Agent, session_id: str | None, loop: asyncio.AbstractEventLoop) -> Session:
+    """A new session, or the saved conversation ``session_id`` (which must exist)."""
+    session = agent.new_session(session_id=session_id)
+    if session_id is not None and not session.resumed:
+        loop.run_until_complete(session.close())
+        raise ConfigurationError(f"--resume: no saved conversation {session_id!r} in this workspace")
+    return session
 
 
 def build_doctor_parser() -> argparse.ArgumentParser:
@@ -299,9 +349,10 @@ def main(argv: list[str] | None = None) -> int:
             machine_out.attach(agent.events)
         if agent.permission_mode is PermissionMode.BYPASS and args.prompt is not None:
             renderer.error(BYPASS_WARNING)  # no header in one-shot mode; warn on stderr
+        session_id = resume_target(agent, args)
         if args.prompt is not None:
-            return run_once(agent, args.prompt, renderer, prompter, machine_out, schema)
-        return run_interactive(agent, renderer, prompter)
+            return run_once(agent, args.prompt, renderer, prompter, machine_out, schema, session_id)
+        return run_interactive(agent, renderer, prompter, session_id)
     except KennelError as exc:
         code = exit_code_for(exc)
         if args.verbose and code == 1:  # a bug worth a traceback, not a bad flag or a missing model
@@ -369,9 +420,14 @@ def run_once(
     prompter: ConsolePrompter | None,
     machine_out: MachineOutput | None = None,
     schema: dict | None = None,
+    session_id: str | None = None,
 ) -> int:
     loop = asyncio.new_event_loop()
-    session = agent.new_session()
+    try:
+        session = open_session(agent, session_id, loop)
+    except BaseException:
+        loop.close()
+        raise
     result: AgentResult | None = None
     failed: KennelError | None = None
     failure: dict[str, Any] | None = None
@@ -494,7 +550,11 @@ def _build_commands(
         out.write(_usage_lines(session))
 
     def cmd_clear(_args: list[str]) -> None:
-        loop.run_until_complete(session.clear())
+        try:
+            loop.run_until_complete(session.clear())
+        except KennelError as exc:  # the saved conversation is still there: do not say it is gone
+            renderer.error(str(exc))
+            return
         renderer.note("(conversation cleared)")
 
     def cmd_compact(_args: list[str]) -> None:
@@ -546,7 +606,9 @@ def _build_commands(
     }
 
 
-def run_interactive(agent: Agent, renderer: Renderer, prompter: ConsolePrompter | None) -> int:
+def run_interactive(
+    agent: Agent, renderer: Renderer, prompter: ConsolePrompter | None, session_id: str | None = None
+) -> int:
     # Deliberately no readline: with libedit, Ctrl-C at the prompt is only acted on at the
     # next Enter and queued input can be dropped. Cooked-mode input() keeps Ctrl-C predictable.
     # For the same reason the prompt owns the tty queue: anything typed while the agent was
@@ -554,10 +616,14 @@ def run_interactive(agent: Agent, renderer: Renderer, prompter: ConsolePrompter 
     # screen because the terminal echoed them at keypress time and we never touch ECHO --
     # a terminal mode we changed is a terminal mode a hard crash can leave broken.
     out = renderer.out
+    loop = asyncio.new_event_loop()
+    try:
+        session = open_session(agent, session_id, loop)
+    except BaseException:
+        loop.close()
+        raise
     out.write(_header(agent) + "\n\n")
     out.flush()
-    loop = asyncio.new_event_loop()
-    session = agent.new_session()
     commands = _build_commands(agent, session, renderer, loop)
     last_interrupt = 0.0
     try:
