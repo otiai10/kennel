@@ -59,7 +59,7 @@ object.
 | `is_error` | boolean | the turn produced no usable answer. `tool_limit` is **not** an error: the answer is there, only possibly incomplete |
 | `error` | string \| null | the user-facing message when `is_error` is true |
 | `duration_ms` | number | wall-clock time of the turn (0 when it failed before starting) |
-| `session_id` | string | the session this turn ran in (empty when it failed before the session started) |
+| `session_id` | string | the session this turn ran in (empty when it failed before the session started); with `--continue` / `--resume`, the id of the resumed conversation |
 | `tool_calls` | array of [tool call](#tool-call-object) | every tool call of this turn, in order |
 | `usage` | object \| null | `{"input_tokens", "output_tokens"}`; `null` while the on-device provider reports no token counts |
 | `structured_output` | object \| null | the guided-generation value when `--json-schema` (SDK: `run(schema=)`) was used, else `null`. When set, `text` is the same document as JSON |
