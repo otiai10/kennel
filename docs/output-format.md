@@ -79,13 +79,13 @@ The fields of `kennel.ToolCallRecord`:
 | --- | --- | --- |
 | `name` | string | tool name |
 | `arguments` | object | validated arguments |
-| `summary` | string | one-line human summary (`Read README.md [1-50]`) |
+| `summary` | string | one-line human summary (`Read README.md [1-50]`); for `fetch` the URL without its query and fragment (`Fetch https://docs.python.org/3/library/`), while `arguments` keeps the whole URL |
 | `status` | `"ok"` \| `"error"` \| `"denied"` \| `"blocked"` \| `"invalid"` | outcome |
 | `output_bytes` | integer | size of the result the tool produced (what the model received, unless `withheld`) |
 | `truncated` | boolean | the result was cut to the output limit |
 | `duration_ms` | number | execution time |
 | `error` | string \| null | why it failed |
-| `metadata` | object | tool-specific extras; counts and names, never content (`web`: `{"provider", "returned"}`, the search provider's name and the number of results) |
+| `metadata` | object | tool-specific extras; counts and names, never content (`web`: `{"provider", "returned"}`, the search provider's name and the number of results; `fetch`: `{"host", "status", "bytes", "content_type"}`, the normalised host, the HTTP status, the size of the body received and its media type, never the page) |
 | `withheld` | boolean | the result was too big for the model's whole context window, so the model got a short "ask for a smaller part" instruction instead of it |
 
 ### Failure object
