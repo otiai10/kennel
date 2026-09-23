@@ -28,10 +28,10 @@ Kennel は会議記録のような私的な文書を扱うために存在し、�
 「何が起きたか」を伝える経路と「何を許すか」を決める経路を型で分ける。観測が壊れてもエージェントは止めてはならず、ポリシーが壊れたときに黙って素通しさせてはならない。
 
 - `EventBus` の購読者は観測のみ。例外はログされ握りつぶされる。イベントは要約・サイズ・時間だけを運び、ファイル内容や生成テキストは運ばない
-- `Hooks`(`before_tool` / `after_tool` / `before_prompt`)と prompter は介入。`before_tool` / `after_tool` が例外を投げたらそのツール呼び出しは失敗する。壊れたポリシーは「ポリシーが無い」ではなく「エラー」である(`before_prompt` への適用は #23)
+- `Hooks`(`before_tool` / `after_tool` / `before_prompt`)と prompter は介入。`before_tool` / `after_tool` が例外を投げたらそのツール呼び出しは失敗する。壊れたポリシーは「ポリシーが無い」ではなく「エラー」である
 - フックは同一プロセスのアプリケーションコードと同じ信頼レベルで動く。隔離された拡張点ではない
 
-正本: `src/kennel/events.py`、`src/kennel/hooks.py`、`src/kennel/runner.py`、`tests/unit/test_hooks.py`、`SECURITY.md`
+正本: `src/kennel/events.py`、`src/kennel/hooks.py`、`src/kennel/runner.py`、`src/kennel/session.py`、`tests/unit/test_hooks.py`、`SECURITY.md`
 
 ## 4. 推測を実測と混ぜない — プロバイダが測らない数値を Kennel が埋めない
 

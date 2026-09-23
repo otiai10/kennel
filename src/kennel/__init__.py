@@ -5,6 +5,7 @@ from .config import KennelConfig, load_config
 from .errors import (
     ConfigurationError,
     ContextLimitError,
+    HookError,
     KennelError,
     ModelUnavailableError,
     PermissionDeniedError,
@@ -67,6 +68,7 @@ __all__ = [
     "EventBus",
     "EventType",
     "HookContext",
+    "HookError",
     "JsonlEventLog",
     "HookMatcher",
     "Hooks",

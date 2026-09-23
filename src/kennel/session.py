@@ -19,7 +19,7 @@ from .context import (
     estimate_tokens_from_bytes,
     looks_like_tool_narration,
 )
-from .errors import ContextLimitError, KennelError, ProviderError, TurnCancelledError
+from .errors import ContextLimitError, HookError, KennelError, ProviderError, TurnCancelledError
 from .events import Event, EventType, JsonlEventLog, session_log_path
 from .hooks import run_hook
 from .providers.base import ProviderSession, Usage
@@ -428,7 +428,7 @@ class Session:
         timeout = self.agent.config.turn_timeout_seconds
         # before_prompt applies to what the user asked, not to Kennel's own
         # re-prompts, and the history keeps the user's words.
-        sent = await self._apply_before_prompt(prompt)
+        sent = await self._apply_before_prompt(prompt, started, before)
         structured: dict[str, Any] | None = None
 
         async def generate() -> str:
@@ -573,13 +573,34 @@ class Session:
                 task.cancel()
 
 
-    async def _apply_before_prompt(self, prompt: str) -> str:
-        """Append whatever the ``before_prompt`` hooks add to the prompt (additional context)."""
+    async def _apply_before_prompt(self, prompt: str, started: float, before: ContextUsage) -> str:
+        """Append whatever the ``before_prompt`` hooks add to the prompt (additional context).
+
+        A hook that raises fails the turn (#23). Hooks are intervention, so a broken policy
+        is an error rather than silence (principle 3), and ``before_tool`` / ``after_tool``
+        already say so by failing the tool call. There is no tool call here, so the turn is
+        what fails: the exception becomes a :class:`~kennel.errors.HookError` and the failure
+        goes through :meth:`_fail_turn`, which is the one place that decides what a failed
+        turn looks like (principle 2). That keeps ``session.failed``, :attr:`last_failure`
+        and :attr:`history` identical to every other failure, so a consumer that already
+        catches ``KennelError`` — the CLI does — needs no second code path.
+
+        ``started`` and ``before`` are what ``run()`` measured for this turn; they are passed
+        in rather than taken again so the failure report describes the turn the user asked
+        for, not the moment the hook broke.
+        """
         if not self.agent.hooks.before_prompt:
             return prompt
         extra: list[str] = []
         for hook in list(self.agent.hooks.before_prompt):
-            added = await run_hook(hook, prompt, self)
+            try:
+                added = await run_hook(hook, prompt, self)
+            # ``Exception`` and not ``BaseException``: an interrupt (``CancelledError``)
+            # is not the hook's failure, and ``run()`` already knows what to do with it.
+            except Exception as exc:  # noqa: BLE001 - a broken policy is an error, not silence
+                failed = HookError(f"hook failed: {exc}")
+                await self._fail_turn(failed, prompt, "", started, before)
+                raise failed from exc
             if added:
                 extra.append(str(added).strip())
         return "\n\n".join([prompt, *extra]) if extra else prompt

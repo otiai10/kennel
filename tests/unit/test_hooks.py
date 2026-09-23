@@ -8,8 +8,10 @@ from kennel import (
     Approval,
     Deny,
     EventType,
+    HookError,
     HookMatcher,
     Hooks,
+    KennelError,
     MockProvider,
     PermissionKind,
     PermissionManager,
@@ -253,6 +255,78 @@ async def test_before_prompt_returning_none_changes_nothing(meeting_ws):
     agent, provider, _ = make_agent(meeting_ws, ["ok"], hooks=Hooks(before_prompt=[lambda prompt, session: None]))
     await agent.run("hi")
     assert provider.sessions[0].prompts == ["hi"]
+
+
+async def test_a_raising_before_prompt_hook_fails_the_turn(meeting_ws):
+    """#23 AC-1: the turn fails with HookError and says so through ``session.failed``.
+
+    ``before_tool`` has a tool call to fail; ``before_prompt`` does not, so the turn is
+    what fails. It must still arrive as a ``KennelError`` rather than the hook's own
+    exception, because that is all a consumer (the CLI among them) catches.
+    """
+
+    def broken(prompt, session):
+        raise RuntimeError("policy exploded")
+
+    agent, provider, events = make_agent(meeting_ws, ["ok"], hooks=Hooks(before_prompt=[broken]))
+    async with agent.new_session() as session:
+        with pytest.raises(HookError) as caught:
+            await session.run("hi")
+        assert str(caught.value) == "hook failed: policy exploded"
+        assert isinstance(caught.value, KennelError)
+        assert isinstance(caught.value.__cause__, RuntimeError)  # the original is not lost
+        failures = [e for e in events if e.type == EventType.SESSION_FAILED]
+        assert len(failures) == 1
+        assert failures[0].data["error"] == "hook failed: policy exploded"
+        assert failures[0].data["error_type"] == "HookError"
+        # The failed turn is on the record, and the prompt never reached the provider.
+        assert session.last_failure["error"] == "hook failed: policy exploded"
+        assert [turn.stop_reason for turn in session.history] == ["error"]
+        assert provider.sessions == []
+
+
+async def test_a_raising_before_prompt_hook_leaves_the_session_usable(meeting_ws):
+    """#23 AC-3: no traceback and the next prompt is accepted.
+
+    The CLI exposes no way to inject hooks (``kennel.cli.main`` never mentions them), so
+    this criterion is met at the SDK level instead. What the REPL loop needs is exactly
+    these two things: the error is a ``KennelError`` its ``except KennelError`` already
+    catches, and the same session still serves the next prompt.
+    """
+    failing = [True]
+
+    def flaky(prompt, session):
+        if failing[0]:
+            raise RuntimeError("policy exploded")
+        return "context"
+
+    agent, provider, _ = make_agent(meeting_ws, ["ok"], hooks=Hooks(before_prompt=[flaky]))
+    async with agent.new_session() as session:
+        with pytest.raises(HookError):
+            await session.run("first")
+        failing[0] = False
+        result = await session.run("second")
+    assert result.text == "ok"
+    assert result.stop_reason == "end_turn"
+    assert provider.sessions[-1].prompts == ["second\n\ncontext"]
+
+
+async def test_a_raising_before_prompt_hook_fails_stream_after_the_event(meeting_ws):
+    """#23 AC-2: through ``stream()``, ``session.failed`` is yielded before HookError."""
+
+    def broken(prompt, session):
+        raise RuntimeError("policy exploded")
+
+    agent = Agent(meeting_ws, provider=MockProvider(["ok"]), hooks=Hooks(before_prompt=[broken]))
+    seen = []
+    async with agent.new_session() as session:
+        with pytest.raises(HookError):
+            async for event in session.stream("hi"):
+                seen.append(event.type)
+    # Not luck: _fail_turn puts session.failed on the queue before run() raises, and the
+    # task's done callback only then puts the sentinel that ends the iteration.
+    assert seen[-1] == EventType.SESSION_FAILED
+    assert EventType.SESSION_COMPLETED not in seen  # the iterator ended on the failure
 
 
 # -- prompter answers ------------------------------------------------------

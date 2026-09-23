@@ -379,6 +379,9 @@ agent.hooks.before_tool.append(another_guard)   # also fine after construction
 - `HookMatcher(tools=[...], hooks=[...])` restricts hooks to named tools.
 - A hook that raises fails the tool call (`status="error"`). A broken policy is an error,
   not an absence of policy — unlike an event subscriber, whose exceptions are only logged.
+  A `before_prompt` hook has no tool call to fail, so it fails the turn instead: `run()`
+  raises `HookError` (a `KennelError`, so the CLI prints `error: hook failed: ...` and
+  stays in its prompt) after emitting `session.failed`.
 - `ctx` is a `HookContext` carrying the `session_id`, the `tool` and the same `ToolContext`
   the tool will run with (`ctx.workspace`, `ctx.permissions`, `ctx.environment`). Hooks run
   on the provider's tool thread, so they get plain data and thread-safe services only, and
