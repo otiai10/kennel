@@ -21,7 +21,13 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..credentials import SECRETS_KEY, Secret, check_no_secret_values, resolve_secrets
+from ..credentials import (
+    SECRETS_KEY,
+    Secret,
+    check_no_secret_values,
+    resolve_secrets,
+    variable_names,
+)
 from ..diagnostics import Check
 from ..errors import ConfigurationError
 from .base import SearchProvider
@@ -102,9 +108,12 @@ def where(name: str) -> str:
 
 
 def check_options(name: str, options: Mapping[str, Any]) -> None:
-    """Refuse a declared secret written as a value. A no-op for names not registered yet."""
+    """Refuse a declared secret written as a value, or a ``secrets`` entry that is not a
+    variable name. A no-op for names not registered yet (:func:`create` checks them)."""
     if name in _SPECS:
-        check_no_secret_values(_SPECS[name].secrets, options, where=where(name))
+        declared = _SPECS[name].secrets
+        check_no_secret_values(declared, options, where=where(name))
+        variable_names(declared, options.get(SECRETS_KEY), where=where(name))
 
 
 def create(name: str, options: Mapping[str, Any] | None = None) -> SearchProvider:

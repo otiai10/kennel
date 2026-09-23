@@ -45,7 +45,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .credentials import SECRETS_KEY, variable_names
 from .errors import ConfigurationError
 from .permissions import PermissionMode, parse_policy
 from .providers.registry import DEFAULT_PROVIDER
@@ -141,10 +140,6 @@ def _check_search_providers(value: Any, source: str) -> None:
             raise ConfigurationError(f"{source}: {where} must be an object")
         try:
             search_registry.check_options(name, options)
-            if name in search_registry.names():
-                variable_names(search_registry.spec(name).secrets, options.get(SECRETS_KEY), where=where)
-            elif not isinstance(options.get(SECRETS_KEY, {}), dict):
-                raise ConfigurationError(f"{where}.{SECRETS_KEY} must be an object of variable names")
         except ConfigurationError as exc:
             raise ConfigurationError(f"{source}: {exc}") from None
 

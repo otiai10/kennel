@@ -23,7 +23,7 @@ from ..config import (
     load_config,
     read_config_file,
 )
-from ..credentials import SECRETS_KEY, MissingSecretError, secret_status
+from ..credentials import SECRETS_KEY, secret_status
 from ..diagnostics import Check
 from ..errors import ConfigurationError
 from ..events import state_dir
@@ -96,12 +96,10 @@ def _search_checks(cfg: KennelConfig | None) -> list[Check]:
                 hint=None if ok else f"export {status.env}=... (the key is read from the environment only)",
             )
         )
+    if not all(c.ok for c in checks):
+        return [Check("web search", True, f"web search: {name}"), *checks, Check("web search reachable", False, f"skipped: {name} has no key")]
     try:
         provider = search_registry.create(name, options)
-    except MissingSecretError:
-        checks.insert(0, Check("web search", True, f"web search: {name}"))
-        checks.append(Check("web search reachable", False, f"skipped: {name} has no key"))
-        return checks
     except ConfigurationError as exc:
         return [Check("web search", False, str(exc), hint=hint), *checks]
     checks.insert(0, Check("web search", True, f"web search: {provider.info.describe()}"))
