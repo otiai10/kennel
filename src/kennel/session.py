@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import time
 import uuid
@@ -27,6 +28,9 @@ from .runner import ToolCallRecord, ToolRunner
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from .sessions import SessionStore
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -115,6 +119,12 @@ class Session:
         self.agent = agent
         self.id = session_id or uuid.uuid4().hex[:12]
         self.history: list[Turn] = []
+        #: True when this session was opened on an id whose saved turns were read back
+        #: from the agent's session store (#62). :meth:`clear` sets it back to False.
+        self.resumed = False
+        self._release_store: Callable[[], None] | None = None
+        if agent.session_store is not None:
+            self._open_store(agent.session_store, session_id)
         self.compactions = 0
         self.last_result: AgentResult | None = None
         #: Facts about the turn that failed most recently, as ``session.failed`` carried
@@ -210,6 +220,52 @@ class Session:
         if self._started and not self._failed:
             self._emit(EventType.SESSION_COMPLETED, turns=len(self.history))
         self._close_event_log()  # after the closing event, so the log ends with it
+        release, self._release_store = self._release_store, None
+        if release is not None:
+            release()
+
+    # -- saved conversations (#62) -------------------------------------------
+
+    def _open_store(self, store: SessionStore, requested: str | None) -> None:
+        """Claim this id in ``store`` and, for an id the caller chose, read its turns back.
+
+        A chosen id must pass :func:`~kennel.sessions.check_session_id` (an empty one too,
+        rather than silently becoming a new random id).
+
+        The restored turns only fill :attr:`history`; no provider session exists yet, so the
+        first turn opens one seeded with the summary of that history (:meth:`_compaction_note`),
+        exactly as after :meth:`compact` — which is not counted in :attr:`compactions`.
+        Session grants are not part of a transcript: they live in the agent's
+        ``PermissionManager`` for as long as the process does.
+        """
+        from .sessions import check_session_id  # sessions imports this module
+
+        if requested is not None:
+            check_session_id(requested)
+        release = store.lock(self.id)
+        try:
+            if requested is not None:
+                self.history = store.load(self.id)
+                self.resumed = bool(self.history)
+        except BaseException:
+            release()
+            raise
+        self._release_store = release
+
+    def _record(self, turn: Turn) -> None:
+        """Add ``turn`` to :attr:`history` and, when the agent saves conversations, to its store.
+
+        A store that fails is reported through ``logging`` and not retried: losing a saved
+        turn must not cost the user the answer they are waiting for.
+        """
+        self.history.append(turn)
+        store = self.agent.session_store
+        if store is None:
+            return
+        try:
+            store.append(self.id, turn)
+        except Exception as exc:  # noqa: BLE001 - saving is a convenience, the turn is not
+            log.warning("session %s: the turn was not saved: %s", self.id, exc)
 
     def _open_event_log(self) -> None:
         """Start writing this session's events to :attr:`log_path` (a no-op when logging is off).
@@ -232,7 +288,15 @@ class Session:
             self._event_log = None
 
     async def clear(self) -> None:
-        """Forget the conversation (keeps configuration and the session id)."""
+        """Forget the conversation (keeps configuration and the session id).
+
+        With a session store, the saved conversation is deleted first; if that fails the
+        error is raised and nothing is forgotten, so the user is never told a conversation is
+        gone while a later ``--resume`` would bring it back.
+        """
+        if self.agent.session_store is not None:
+            self.agent.session_store.clear(self.id)
+        self.resumed = False
         self.history.clear()  # before dropping, so the window derives from an empty history
         self.compactions = 0
         await self._drop_provider()
@@ -251,6 +315,7 @@ class Session:
             "context": self.context_usage().summary(),
             "log": str(self.log_path) if self.log_path is not None else "off",
             "workspace": str(self.agent.workspace.root),
+            "resumed": self.resumed,
         }
         web = self.agent.web_search()
         if web is not None:
@@ -365,7 +430,7 @@ class Session:
         Callers must raise afterwards: this reports the failure, it does not swallow it.
         """
         records = self.runner.turn_records()
-        self.history.append(Turn(prompt, text, "error", records))
+        self._record(Turn(prompt, text, "error", records))
         failure = {
             "error": str(exc),
             "error_type": type(exc).__name__,
@@ -495,7 +560,7 @@ class Session:
         if stop_reason == "end_turn" and self.runner.limit_hit:
             stop_reason = "tool_limit"
         records = self.runner.turn_records()
-        self.history.append(Turn(prompt, text, stop_reason, records))
+        self._record(Turn(prompt, text, stop_reason, records))
         self._emit(EventType.MODEL_COMPLETED, stop_reason=stop_reason, chars=len(text), tool_calls=len(records))
         # usage stays None unless the provider counts tokens: an estimate per turn would
         # duplicate context_usage() without anything to calibrate it against.

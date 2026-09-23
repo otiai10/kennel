@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator, Iterable, Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .config import KennelConfig, load_config
 from .events import Event, EventBus
@@ -16,6 +17,9 @@ from .registry import DEFAULT_TOOLS, ToolRegistry, builtin_registry
 from .session import AgentResult, Session
 from .tools.base import Tool, ToolContext
 from .workspace import Workspace, workspace_overview
+
+if TYPE_CHECKING:
+    from .sessions import SessionStore
 
 DEFAULT_INSTRUCTIONS = """You are Kennel, a local assistant with tools for the user's files.
 Procedure for every request about files: 1) call glob to find candidate files, 2) read the relevant ones, 3) only then answer.
@@ -40,6 +44,10 @@ class Agent:
     ``provider`` takes a :class:`~kennel.ModelProvider` or a registered provider name
     (``Agent(provider="mock")``); ``None`` uses the ``provider`` config key, defaulting to
     ``apple``. A name is built with the options under ``providers.<name>`` in the config.
+
+    ``session_store`` saves every session's turns so a later :meth:`new_session` can pick
+    the conversation up again (``new_session(session_id=...)``); without one nothing is saved
+    or read back. See :class:`~kennel.FileSessionStore`.
     """
 
     def __init__(
@@ -59,6 +67,7 @@ class Agent:
         events: EventBus | None = None,
         environment: Mapping[str, str] | None = None,
         registry: ToolRegistry | None = None,
+        session_store: SessionStore | None = None,
     ) -> None:
         self.workspace = Workspace(workspace)
         self.config = config if config is not None else load_config(self.workspace.root)
@@ -75,6 +84,7 @@ class Agent:
         self.provider: ModelProvider = self._resolve_provider(provider)
         self.events = events if events is not None else EventBus()
         self.environment: dict[str, str] = dict(environment or {})
+        self.session_store = session_store
         # Precedence: Agent() argument > project config > user config. The CLI passes its
         # --system-prompt as this argument, which is what keeps "CLI flags first" true.
         self.system_prompt: str | None = system_prompt if system_prompt is not None else self.config.system_prompt
@@ -121,8 +131,15 @@ class Agent:
     def check_availability(self) -> None:
         self.provider.check_availability()
 
-    def new_session(self) -> Session:
-        return Session(self)
+    def new_session(self, session_id: str | None = None) -> Session:
+        """Open a session; with ``session_id`` and a :attr:`session_store`, resume that conversation.
+
+        The restored session reports ``resumed`` True when saved turns were found (an id with
+        nothing saved starts empty under that id). With a store, the id must be 1-64 letters,
+        digits, ``-`` or ``_``, and an id another open session holds is refused; both raise
+        :class:`~kennel.errors.ConfigurationError`.
+        """
+        return Session(self, session_id=session_id)
 
     async def run(self, prompt: str, **kwargs) -> AgentResult:
         """Run ``prompt`` in a fresh session and return the result.
