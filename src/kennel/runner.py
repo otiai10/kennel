@@ -278,7 +278,9 @@ class ToolRunner:
                 warnings = tool.permission_warnings(args, self._context)
             except KennelError as exc:
                 return self._fail(name, args, summary, exc)
-            request = PermissionRequest(name, tool.permission, summary, details, warnings, dict(args))
+            request = PermissionRequest(
+                name, tool.permission, summary, details, warnings, dict(args), tool.session_scope(args)
+            )
             self._emit(EventType.PERMISSION_REQUESTED, tool=name, summary=summary, warnings=list(warnings))
             decided = pm.decide(request, matcher=tool.match_rule, decision=decision)
             if not decided.allowed:
@@ -365,7 +367,8 @@ class ToolRunner:
         updated: Mapping[str, Any] | None = None
         call = ToolCallRequest(tool.name, args, summary)
         for hook in select_hooks(self._hooks.before_tool, tool.name):
-            outcome = pm.resolve(tool.name, await run_hook(hook, call, context))
+            answer = await run_hook(hook, call, context)
+            outcome = pm.resolve(tool.name, answer, scope=tool.session_scope(call.arguments))
             if not outcome.allowed:
                 return outcome
             if outcome.updated_arguments is not None:

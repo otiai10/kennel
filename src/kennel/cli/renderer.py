@@ -194,7 +194,8 @@ class ConsolePrompter:
             # Every ask redraws the boundary: only what is typed after this question is
             # printed counts as its answer, re-asks included.
             discard_typed_ahead(self.inp)
-            self.out.write("  [y] once  [a] session  [n] deny > ")
+            session = "session" if request.scope is None else f"session ({request.scope})"
+            self.out.write(f"  [y] once  [a] {session}  [n] deny > ")
             self.out.flush()
             answer = self._read_line()
             if answer is None:

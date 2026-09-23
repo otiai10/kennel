@@ -514,7 +514,8 @@ def _build_commands(
             out.write(f"{'tool':<8}{'decision':<10}{'session-grant':<15}rules\n")
             for name in sorted(agent.tools):
                 decision = policy.get(name, Decision.ALLOW)
-                grant = "yes" if agent.permissions.has_session_grant(name) else "-"
+                scopes = agent.permissions.session_scopes(name)
+                grant = "yes" if None in scopes else ",".join(s for s in scopes if s) or "-"
                 rules = ", ".join(f"{r.key}={r.decision.value}" for r in specifier_rules if r.tool_name == name)
                 out.write(f"{name:<8}{decision.value:<10}{grant:<15}{rules}\n")
             return

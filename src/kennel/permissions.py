@@ -139,7 +139,7 @@ class Allow:
 
     ``updated_arguments`` replaces the call's arguments (they are re-validated).
     ``remember="session"`` grants the tool for the rest of the session, like
-    :attr:`Approval.SESSION`.
+    :attr:`Approval.SESSION` (within the tool's :meth:`~kennel.Tool.session_scope`).
     """
 
     updated_arguments: Mapping[str, Any] | None = None
@@ -169,6 +169,9 @@ class PermissionRequest:
     # what is actually being asked for. Excluded from equality so the request
     # stays hashable.
     arguments: Mapping[str, Any] = field(default_factory=dict, compare=False)
+    # What an Approval.SESSION answer grants (Tool.session_scope): None for the whole
+    # tool, or e.g. the host for fetch, so a prompter can say what "session" covers.
+    scope: str | None = None
 
 
 @dataclass(frozen=True)
@@ -239,7 +242,8 @@ class PermissionManager:
         # resolving a call is a single dict lookup on the tool call hot path.
         self._rules: dict[str, list[PermissionRule]] = {}
         self._prompter = prompter
-        self._session_grants: set[str] = set()
+        # (tool name, scope); scope None grants the whole tool (Tool.session_scope).
+        self._session_grants: set[tuple[str, str | None]] = set()
         self._lock = threading.Lock()
         self.update(policy)
 
@@ -313,13 +317,22 @@ class PermissionManager:
     def set_decision(self, tool_name: str, decision: Decision | str) -> None:
         self.update({tool_name: decision})
 
-    def grant_session(self, tool_name: str) -> None:
+    def grant_session(self, tool_name: str, scope: str | None = None) -> None:
+        """Remember an approval for the rest of the session: the whole tool, or one ``scope``."""
         with self._lock:
-            self._session_grants.add(tool_name)
+            self._session_grants.add((tool_name, scope))
 
-    def has_session_grant(self, tool_name: str) -> bool:
+    def has_session_grant(self, tool_name: str, scope: str | None = None) -> bool:
+        """Is this call covered: by a grant for the whole tool, or for exactly ``scope``?"""
         with self._lock:
-            return tool_name in self._session_grants
+            return (tool_name, None) in self._session_grants or (
+                scope is not None and (tool_name, scope) in self._session_grants
+            )
+
+    def session_scopes(self, tool_name: str) -> list[str | None]:
+        """The grants held for ``tool_name`` (``None`` = the whole tool), for display."""
+        with self._lock:
+            return sorted((s for t, s in self._session_grants if t == tool_name), key=lambda s: s or "")
 
     def check(
         self,
@@ -352,28 +365,31 @@ class PermissionManager:
             return PermissionOutcome(True)
         if decision is Decision.DENY:
             return PermissionOutcome(False)
-        if self.has_session_grant(request.tool_name):
+        if self.has_session_grant(request.tool_name, request.scope):
             return PermissionOutcome(True)
         if self._prompter is None:
             return PermissionOutcome(False)  # non-interactive: ask => deny
-        return self.resolve(request.tool_name, self._prompter(request))
+        return self.resolve(request.tool_name, self._prompter(request), scope=request.scope)
 
-    def resolve(self, tool_name: str, answer: Approval | Allow | Deny | None) -> PermissionOutcome:
+    def resolve(
+        self, tool_name: str, answer: Approval | Allow | Deny | None, *, scope: str | None = None
+    ) -> PermissionOutcome:
         """Interpret one answer about ``tool_name``, wherever it came from.
 
         Prompters and application hooks speak the same vocabulary, so what an
         ``Allow`` or a ``Deny`` *means* — including remembering a grant for the
-        session — is decided here and nowhere else. ``None`` means "no opinion"
+        session, within ``scope`` (the tool's :meth:`~kennel.Tool.session_scope`)
+        — is decided here and nowhere else. ``None`` means "no opinion"
         and leaves the call allowed to continue.
         """
         if isinstance(answer, Deny):
             return PermissionOutcome(False, message=answer.message)
         if isinstance(answer, Allow):
             if answer.remember_session:
-                self.grant_session(tool_name)
+                self.grant_session(tool_name, scope)
             return PermissionOutcome(True, updated_arguments=answer.updated_arguments)
         if answer is Approval.SESSION:
-            self.grant_session(tool_name)
+            self.grant_session(tool_name, scope)
             return PermissionOutcome(True)
         if answer is None:
             return PermissionOutcome(True)
