@@ -147,7 +147,7 @@ async def test_a_rewrite_into_ask_or_allow_runs_without_asking_again(meeting_ws,
 # -- AC-3: the grant follows the final arguments ---------------------------------
 
 
-FETCH_A_THEN_B = [
+FETCH_A = [
     ToolCall("fetch", {"url": "https://a.example/1"}),
     Text("done"),
 ]
@@ -159,7 +159,7 @@ async def test_a_prompter_session_grant_is_for_the_rewritten_host(meeting_ws):
     def prompter(request):
         return Allow(updated_arguments={"url": "https://b.example/x"}, remember="session")
 
-    agent, _, _ = run_agent(meeting_ws, [FETCH_A_THEN_B], tools=[tool], prompter=prompter, permissions={"fetch": "ask"})
+    agent, _, _ = run_agent(meeting_ws, [FETCH_A], tools=[tool], prompter=prompter, permissions={"fetch": "ask"})
     result = await agent.run("go")
     assert result.tool_calls[0].status == "ok"
     assert tool.fetched == ["https://b.example/x"]
@@ -177,7 +177,7 @@ async def test_a_hook_session_grant_is_for_the_last_rewrite(meeting_ws):
         return Allow(updated_arguments={"url": "https://c.example/y"})
 
     agent, _, _ = run_agent(
-        meeting_ws, [FETCH_A_THEN_B], tools=[tool], permissions={"fetch": "ask"},
+        meeting_ws, [FETCH_A], tools=[tool], permissions={"fetch": "ask"},
         prompter=lambda request: pytest.fail("the hook's session approval covers this call"),
         hooks=Hooks(before_tool=[to_b, to_c]),
     )
@@ -190,13 +190,13 @@ async def test_a_hook_session_grant_is_for_the_last_rewrite(meeting_ws):
 # -- AC-4: a call that does not run grants nothing ---------------------------------
 
 
-def knock_twice(path: str) -> list:
+def write_twice(path: str) -> list:
     return [[ToolCall("write", {"path": path, "content": "x"}), Text("one")], [ToolCall("write", {"path": path, "content": "x"}), Text("two")]]
 
 
 async def run_twice(ws, prompter, **kw):
     """Run the same write twice; report whether a grant existed between the two runs."""
-    agent, _, _ = run_agent(ws, knock_twice("a.md"), prompter=prompter, **kw)
+    agent, _, _ = run_agent(ws, write_twice("a.md"), prompter=prompter, **kw)
     session = agent.new_session()
     first = await session.run("first")
     granted_after_first = agent.permissions.has_session_grant("write")
@@ -281,15 +281,15 @@ def test_decide_and_check_still_grant_immediately(answer):
         asked.append(request)
         return answer
 
-    pm = PermissionManager(prompter=prompter)
-    request = PermissionRequest("fetch", PermissionKind.WRITE, "x", scope="a.example")
+    pm = PermissionManager({"fetch": "ask"}, prompter=prompter)
+    request = PermissionRequest("fetch", PermissionKind.WEB, "x", scope="a.example")
     outcome = pm.decide(request)
     assert outcome.allowed and outcome.remember_session
     assert pm.has_session_grant("fetch", "a.example")
     assert pm.check(request)
     assert len(asked) == 1
 
-    other = PermissionManager(prompter=prompter)
+    other = PermissionManager({"fetch": "ask"}, prompter=prompter)
     assert other.check(request) and other.has_session_grant("fetch", "a.example")
 
 
