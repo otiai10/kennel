@@ -511,7 +511,8 @@ store.
 
 The default instructions tell the model to glob, then grep/read, then answer, and include a
 one-line overview of the workspace's top-level entries. On the on-device model this is what
-makes tool use reliable, especially for non-English prompts.
+makes tool use reliable, especially for non-English prompts. Lines that name glob or grep are
+left out when the agent does not have those tools, so the model is never told to call a tool it lacks.
 
 `Agent(instructions=...)` (or `--instructions` / `kennel.json`'s `agent.instructions`) appends
 to those default instructions and is the safe way to add a house rule ("Answer in Japanese").

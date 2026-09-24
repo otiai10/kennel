@@ -342,6 +342,17 @@ async def test_system_prompt_without_workspace_overview(meeting_ws):
     assert "Top-level entries" not in instructions
 
 
+async def test_default_instructions_name_only_registered_tools(meeting_ws):
+    from kennel import DEFAULT_INSTRUCTIONS
+
+    full, _, _ = make_agent(meeting_ws, ["ok"])
+    assert full.instructions.startswith(DEFAULT_INSTRUCTIONS)
+    read_only, _, _ = make_agent(meeting_ws, ["ok"], tools=["read"])
+    base = read_only.instructions.split("Workspace root")[0]
+    assert "glob" not in base and "grep" not in base
+    assert "Never claim to have read a file" in base
+
+
 async def test_empty_prompt_and_unavailable(meeting_ws):
     from kennel import ModelUnavailableError
 
@@ -385,6 +396,13 @@ async def test_runner_cancel_turn_suppresses_events(meeting_ws):
 
 
 NARRATION = "田中さんのメールを探すために、以下のコマンドを実行します。\n\n```bash\ngrep -r 田中 *.txt\n```\n\nこのコマンドを実行します。"
+
+
+async def test_nudge_without_glob_does_not_name_it(meeting_ws):
+    agent, provider, _ = make_agent(meeting_ws, [NARRATION, "ok"], tools=["read"])
+    await agent.run("メールを放置している気がする")
+    nudge = provider.sessions[0].prompts[1]
+    assert nudge.startswith("Do not describe") and "glob" not in nudge
 
 
 async def test_narration_is_nudged_once(meeting_ws):

@@ -136,6 +136,7 @@ NUDGE_PROMPT = (
     "(start with glob), then give the answer in the language of my previous message. "
     "Do not ask for confirmation or which file to check."
 )
+_NUDGE_GLOB_HINT = " (start with glob)"
 
 
 class Session:
@@ -586,7 +587,7 @@ class Session:
             # The model narrated tool steps instead of taking them: continue once.
             self._emit(EventType.MODEL_NUDGED, chars=len(text), rule=nudge_rule)
             try:
-                text = await asyncio.wait_for(self._generate(NUDGE_PROMPT, on_delta), timeout)
+                text = await asyncio.wait_for(self._generate(self._nudge_prompt(), on_delta), timeout)
             except asyncio.CancelledError:
                 await self._abandon_turn(text)
             except (ContextLimitError, asyncio.TimeoutError):
@@ -709,6 +710,10 @@ class Session:
             if added:
                 extra.append(str(added).strip())
         return "\n\n".join([prompt, *extra]) if extra else prompt
+
+    def _nudge_prompt(self) -> str:
+        """NUDGE_PROMPT, without its glob hint when this agent has no glob tool."""
+        return NUDGE_PROMPT if "glob" in self.agent.tools else NUDGE_PROMPT.replace(_NUDGE_GLOB_HINT, "")
 
     def _should_nudge(self, text: str) -> str | None:
         """The narration rule that fired, or ``None`` if this turn should not be nudged.
