@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
 
+from ._statefiles import check_session_id, open_private
+
 log = logging.getLogger(__name__)
 
 
@@ -111,8 +113,12 @@ def state_dir() -> Path:
 
 
 def session_log_path(session_id: str) -> Path:
-    """The event log file for one session: ``<state_dir>/sessions/<session_id>.jsonl``."""
-    return state_dir() / "sessions" / f"{session_id}.jsonl"
+    """The event log file for one session: ``<state_dir>/sessions/<session_id>.jsonl``.
+
+    ``session_id`` is checked like any other (:func:`~kennel.sessions.check_session_id`), so
+    the path cannot leave ``sessions/``; a bad one raises :class:`~kennel.ConfigurationError`.
+    """
+    return state_dir() / "sessions" / f"{check_session_id(session_id)}.jsonl"
 
 
 class JsonlEventLog:
@@ -124,7 +130,8 @@ class JsonlEventLog:
     Observation must stay silent: a file that cannot be opened or written is reported once
     through ``logging`` and the log then does nothing, so a full disk or a read-only
     directory never stops the agent (constitution principle 3). Usable as a context manager
-    and safe to call from any thread.
+    and safe to call from any thread. The file is ``0600`` and the directories it has to
+    create are ``0700``, whatever the umask; existing directories are left as they are.
 
     Example::
 
@@ -138,8 +145,8 @@ class JsonlEventLog:
         self._lock = threading.Lock()
         self._file: IO[str] | None = None
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            self._file = self.path.open("a", encoding="utf-8")
+            fd = open_private(self.path, os.O_WRONLY | os.O_APPEND)
+            self._file = os.fdopen(fd, "a", encoding="utf-8")
         except OSError as exc:
             log.warning("event log disabled: cannot open %s: %s", self.path, exc)
 

@@ -492,12 +492,16 @@ Each line is one event in the same flat form `--trace` writes to stderr (`t`, `t
 `session_id`, then the event's own data), so it carries summaries, sizes and timings and never
 file contents or generated text. The location is `KENNEL_STATE_DIR`, else
 `$XDG_STATE_HOME/kennel`, else `~/.local/state/kennel`; `/status` and `kennel doctor` print
-it. `--no-log` or `"logging": {"events": false}` turns it off. Nothing is uploaded and nothing
+it. Files are `0600`, and the directories Kennel creates for them `0700`, whatever the umask.
+`--no-log` or `"logging": {"events": false}` turns it off. Nothing is uploaded and nothing
 is rotated for you — the files are yours to `tail`, attach to an issue or delete.
 
 In the SDK the log is **opt-in**, so embedding Kennel does not start writing files behind an
 application's back: pass `KennelConfig(log_events=True)` (or the config key) to get the same
-per-session file, or subscribe `kennel.JsonlEventLog(path)` yourself for full control.
+per-session file, or subscribe `kennel.JsonlEventLog(path)` yourself for full control. A
+`session_id` you choose (`agent.new_session(session_id=...)`) must be 1-64 letters, digits,
+`-` or `_` — it names the file — or `ConfigurationError` is raised, with or without a session
+store.
 
 The default instructions tell the model to glob, then grep/read, then answer, and include a
 one-line overview of the workspace's top-level entries. On the on-device model this is what

@@ -20,12 +20,12 @@ import hashlib
 import json
 import logging
 import os
-import re
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from ._statefiles import SESSION_ID_PATTERN, check_session_id, open_private
 from .errors import ConfigurationError, SessionError
 from .events import state_dir as default_state_dir
 from .runner import ToolCallRecord
@@ -36,22 +36,6 @@ log = logging.getLogger(__name__)
 
 #: The transcript line format. A line with any other ``v`` is refused rather than guessed at.
 TRANSCRIPT_VERSION = 1
-
-_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
-
-
-def check_session_id(session_id: str) -> str:
-    """Return ``session_id`` if it may name a transcript, else raise :class:`ConfigurationError`.
-
-    Only ``[A-Za-z0-9_-]{1,64}``: an id ends up in a file name, so nothing that could walk out
-    of the transcript directory (``..``, ``/``) gets that far.
-    """
-    if not isinstance(session_id, str) or not _SESSION_ID.fullmatch(session_id):
-        raise ConfigurationError(
-            f"invalid session id {session_id!r}: use 1-64 letters, digits, '-' or '_'"
-        )
-    return session_id
-
 
 @runtime_checkable
 class SessionStore(Protocol):
@@ -120,20 +104,8 @@ class FileSessionStore:
             raise ConfigurationError(f"invalid session id {session_id!r}")
         return path
 
-    def _ensure_directory(self) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        for directory in (self.directory.parent, self.directory):
-            os.chmod(directory, 0o700)
-
     def _open_private(self, path: Path, flags: int) -> int:
-        self._ensure_directory()
-        fd = os.open(path, flags | os.O_CREAT, 0o600)
-        try:
-            os.fchmod(fd, 0o600)  # an existing file, or a umask that stripped nothing
-        except OSError:
-            os.close(fd)
-            raise
-        return fd
+        return open_private(path, flags, directories=(self.directory.parent, self.directory))
 
     # -- SessionStore ---------------------------------------------------------
 
@@ -176,7 +148,7 @@ class FileSessionStore:
 
     def latest(self) -> str | None:
         try:
-            candidates = [p for p in self.directory.glob("*.jsonl") if _SESSION_ID.fullmatch(p.stem)]
+            candidates = [p for p in self.directory.glob("*.jsonl") if SESSION_ID_PATTERN.fullmatch(p.stem)]
         except OSError:
             return None
         if not candidates:
