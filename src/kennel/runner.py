@@ -277,6 +277,9 @@ class ToolRunner:
             )
 
         hook_context: HookContext | None = None
+        # "Allow for this session", from a hook or the prompter. Granted only once the call
+        # is certain to run, for the scope of the arguments it runs with (issue #73).
+        remember = False
         if self._hooks.before_tool:
             hook_context = HookContext(self._session_id, self._context, tool)
             try:
@@ -288,6 +291,7 @@ class ToolRunner:
                 self._record(ToolCallRecord(name, args, summary, "blocked", error=outcome.message))
                 self._emit(EventType.TOOL_BLOCKED, tool=name, summary=summary, error=outcome.message)
                 return f"Error: {outcome.message}"
+            remember = outcome.remember_session
             if outcome.updated_arguments is not None:
                 try:
                     args = tool.validate(outcome.updated_arguments)
@@ -307,18 +311,25 @@ class ToolRunner:
                 name, tool.permission, summary, details, warnings, dict(args), tool.session_scope(args)
             )
             self._emit(EventType.PERMISSION_REQUESTED, tool=name, summary=summary, warnings=list(warnings))
-            decided = pm.decide(request, matcher=tool.match_rule, decision=decision)
+            decided = pm.decide(
+                request, matcher=tool.match_rule, decision=decision, remember=False, session_approved=remember
+            )
             if not decided.allowed:
-                reason = decided.message or "The user did not approve this action; do not retry it, explain what you would have done instead."
-                self._record(ToolCallRecord(name, args, summary, "denied", error=decided.message or "permission denied"))
-                self._emit(EventType.PERMISSION_DENIED, tool=name, summary=summary, error=decided.message)
-                return f"Error: permission denied for {name}. {reason}"
+                return self._denied(name, args, summary, decided.message)
+            remember = remember or decided.remember_session
             if decided.updated_arguments is not None:
                 try:
                     args = tool.validate(decided.updated_arguments)
                 except ToolArgumentError as exc:
                     return self._invalid(name, args, summary, exc)
                 summary = tool.summarize(args)
+                # The prompter's arguments are matched like a hook's: deny still wins. Only
+                # deny: the prompter approved exactly these arguments, so an ``ask`` here
+                # does not ask again (issue #73).
+                if pm.decision_for(name, tool.permission, args, tool.match_rule) is Decision.DENY:
+                    return self._denied(name, args, summary, None)
+        if remember:
+            pm.grant_session(name, tool.session_scope(args))
 
         self._emit(EventType.TOOL_STARTED, tool=name, summary=summary)
         started = time.perf_counter()
@@ -384,22 +395,25 @@ class ToolRunner:
     ) -> PermissionOutcome:
         """Run the hooks in order. The first denial wins; argument rewrites accumulate.
 
-        What an ``Allow`` / ``Deny`` means (including remembering a grant) is
-        :meth:`PermissionManager.resolve`'s job, so hooks and prompters cannot
-        drift apart.
+        What an ``Allow`` / ``Deny`` means is :meth:`PermissionManager.resolve`'s job,
+        so hooks and prompters cannot drift apart. A hook's "allow for this session"
+        is reported in ``remember_session`` and granted by :meth:`invoke` once the
+        call is certain to run, for the final arguments.
         """
         pm = self._context.permission_manager
         updated: Mapping[str, Any] | None = None
+        remember = False
         call = ToolCallRequest(tool.name, args, summary)
         for hook in select_hooks(self._hooks.before_tool, tool.name):
             answer = await run_hook(hook, call, context)
-            outcome = pm.resolve(tool.name, answer, scope=tool.session_scope(call.arguments))
+            outcome = pm.resolve(tool.name, answer)
             if not outcome.allowed:
                 return outcome
+            remember = remember or outcome.remember_session
             if outcome.updated_arguments is not None:
                 updated = outcome.updated_arguments
                 call = ToolCallRequest(tool.name, updated, summary)
-        return PermissionOutcome(True, updated_arguments=updated)
+        return PermissionOutcome(True, updated_arguments=updated, remember_session=remember)
 
     async def _after_tool(
         self, tool: Tool, args: dict[str, Any], summary: str, result: ToolResult, context: HookContext
@@ -410,6 +424,13 @@ class ToolRunner:
             if replaced is not None:
                 result = replaced
         return result
+
+    def _denied(self, name: str, args: dict[str, Any], summary: str, message: str | None) -> str:
+        """Record a call the permission check refused and tell the model not to retry it."""
+        reason = message or "The user did not approve this action; do not retry it, explain what you would have done instead."
+        self._record(ToolCallRecord(name, args, summary, "denied", error=message or "permission denied"))
+        self._emit(EventType.PERMISSION_DENIED, tool=name, summary=summary, error=message)
+        return f"Error: permission denied for {name}. {reason}"
 
     def _blocked(self, name: str, args: dict[str, Any], summary: str, reason: str, answer: str) -> str:
         """Record a call a guardrail did not let run, and give the model ``answer`` instead."""
