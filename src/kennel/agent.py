@@ -21,9 +21,17 @@ from .workspace import Workspace, workspace_overview
 if TYPE_CHECKING:
     from .sessions import SessionStore
 
-DEFAULT_INSTRUCTIONS = """You are Kennel, a local assistant with tools for the user's files.
-Procedure for every request about files: 1) call glob to find candidate files, 2) read the relevant ones, 3) only then answer.
-Use grep only to locate an exact word the user gave; for summaries, decisions, tasks or questions about content, read the file. If grep finds nothing, read the file before concluding anything.
+_PROCEDURE_LINE = (
+    "Procedure for every request about files: 1) call glob to find candidate files, "
+    "2) read the relevant ones, 3) only then answer."
+)
+_GREP_LINE = (
+    "Use grep only to locate an exact word the user gave; for summaries, decisions, tasks or "
+    "questions about content, read the file. If grep finds nothing, read the file before concluding anything."
+)
+DEFAULT_INSTRUCTIONS = f"""You are Kennel, a local assistant with tools for the user's files.
+{_PROCEDURE_LINE}
+{_GREP_LINE}
 Do not explain or list the steps you are going to take; take them by calling the tools.
 For requests that do not involve files, just answer directly without tools.
 Never claim to have read a file unless you read it. Paths are relative to the workspace.
@@ -109,8 +117,16 @@ class Agent:
         tool = self.tools.get("web")
         return tool.describe() if isinstance(tool, WebSearchTool) else None
 
+    def _default_instructions(self) -> str:
+        """DEFAULT_INSTRUCTIONS without the lines that name tools this agent does not have."""
+        missing = {
+            _PROCEDURE_LINE: not {"glob", "read"} <= self.tools.keys(),
+            _GREP_LINE: not {"grep", "read"} <= self.tools.keys(),
+        }
+        return "\n".join(line for line in DEFAULT_INSTRUCTIONS.splitlines() if not missing.get(line))
+
     def _build_instructions(self, extra: str | None) -> str:
-        base = self.system_prompt if self.system_prompt is not None else DEFAULT_INSTRUCTIONS
+        base = self.system_prompt if self.system_prompt is not None else self._default_instructions()
         parts = [base]
         if self.include_workspace_overview:
             parts.append(f"Workspace root: {self.workspace.root}\n{workspace_overview(self.workspace)}")
