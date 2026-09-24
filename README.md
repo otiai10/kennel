@@ -421,8 +421,10 @@ agent.hooks.before_tool.append(another_guard)   # also fine after construction
 - `before_tool(call, ctx)` runs after the arguments are validated and **before** the
   permission check, so a policy can deny what the permission policy would have allowed.
   `Deny` records the call as `blocked`, emits `tool.blocked` and returns the message to the
-  model; `Allow(updated_arguments=...)` re-validates and continues; `Allow(remember="session")`
-  grants the tool for the session.
+  model; `Allow(updated_arguments=...)` re-validates the new arguments and matches them
+  against the permission rules again, so a rewrite that hits a `deny` rule is denied;
+  `Allow(remember="session")` grants the tool for the session, for the arguments the call
+  finally runs with, and only once it is certain to run.
 - `after_tool(call, result, ctx)` may return a `ToolResult` to replace the result. The
   replacement is bounded by the same output limit.
 - `before_prompt(prompt, session)` returns text appended to the prompt sent to the model.
@@ -449,7 +451,11 @@ def prompter(request):
 ```
 
 `Deny.message` is what the model is told, so make it actionable; `Allow(updated_arguments=)`
-corrects the call before it runs.
+corrects the call before it runs. Like a hook's, the prompter's rewrite is re-validated and
+re-matched against the rules: `deny` still wins (the call is `denied`), while a rewrite that
+lands on `ask` runs without asking twice. `remember="session"` / `Approval.SESSION` grant the
+scope of the final arguments (for `fetch`, the rewritten host), and nothing is granted when
+the call does not run.
 
 Custom tools subclass `kennel.Tool` and are passed alongside built-in names:
 
@@ -492,12 +498,16 @@ Each line is one event in the same flat form `--trace` writes to stderr (`t`, `t
 `session_id`, then the event's own data), so it carries summaries, sizes and timings and never
 file contents or generated text. The location is `KENNEL_STATE_DIR`, else
 `$XDG_STATE_HOME/kennel`, else `~/.local/state/kennel`; `/status` and `kennel doctor` print
-it. `--no-log` or `"logging": {"events": false}` turns it off. Nothing is uploaded and nothing
+it. Files are `0600`, and the directories Kennel creates for them `0700`, whatever the umask.
+`--no-log` or `"logging": {"events": false}` turns it off. Nothing is uploaded and nothing
 is rotated for you — the files are yours to `tail`, attach to an issue or delete.
 
 In the SDK the log is **opt-in**, so embedding Kennel does not start writing files behind an
 application's back: pass `KennelConfig(log_events=True)` (or the config key) to get the same
-per-session file, or subscribe `kennel.JsonlEventLog(path)` yourself for full control.
+per-session file, or subscribe `kennel.JsonlEventLog(path)` yourself for full control. A
+`session_id` you choose (`agent.new_session(session_id=...)`) must be 1-64 letters, digits,
+`-` or `_` — it names the file — or `ConfigurationError` is raised, with or without a session
+store.
 
 The default instructions tell the model to glob, then grep/read, then answer, and include a
 one-line overview of the workspace's top-level entries. On the on-device model this is what
@@ -914,9 +924,9 @@ providers for a larger context window (`llama-server` over HTTP, `llama-cpp` in 
 process), and the observability work that fills out this release: a per-session JSONL event
 log, tool result sizes and remaining context shown without `--verbose`, failed turns kept in
 the history with the facts of the failure, and a tool result too big for the window withheld
-instead of failing the turn, and opt-in web search through SearXNG or Brave. Not yet:
-fetching a web page's contents, forking, listing or naming saved sessions (resuming one is
-in: `--continue` / `--resume`), MCP,
+instead of failing the turn, opt-in web search through SearXNG or Brave, and opt-in
+fetching of public web pages. Not yet: forking, listing or naming saved sessions (resuming
+one is in: `--continue` / `--resume`), MCP,
 subagents, sandboxed shell. Design principles live in
 [docs/constitution.md](docs/constitution.md); the comparison with Claude Code that drove the
 current roadmap is in `docs/history/`.

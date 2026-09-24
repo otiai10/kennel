@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
+from ._statefiles import check_session_id
 from .context import (
     HistoryTurn,
     compact_history,
@@ -140,7 +141,9 @@ NUDGE_PROMPT = (
 class Session:
     def __init__(self, agent: Agent, *, session_id: str | None = None) -> None:
         self.agent = agent
-        self.id = session_id or uuid.uuid4().hex[:12]
+        # One rule for every id a caller chooses, with or without a store: it names the event
+        # log and the transcript, so it is checked before any path is built (#83).
+        self.id = check_session_id(session_id) if session_id is not None else uuid.uuid4().hex[:12]
         self.history: list[Turn] = []
         #: True when this session was opened on an id whose saved turns were read back
         #: from the agent's session store (#62). :meth:`clear` sets it back to False.
@@ -255,9 +258,6 @@ class Session:
 
     def _open_store(self, store: SessionStore, requested: str | None) -> None:
         """Claim this id in ``store`` and, for an id the caller chose, read its turns back.
-
-        The store validates the id the caller chose — an empty one too, rather than letting it
-        silently become a new random id.
 
         The restored turns only fill :attr:`history`; no provider session exists yet, so the
         first turn opens one seeded with the summary of that history (:meth:`_compaction_note`),

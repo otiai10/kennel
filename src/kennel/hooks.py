@@ -20,9 +20,10 @@ only ever hands them plain data and the shared, thread-safe services.
 
 Returning ``None`` from a hook means "no opinion". A :class:`~kennel.Deny` stops
 the call and its message goes back to the model; an :class:`~kennel.Allow` may
-rewrite the arguments (they are re-validated) or remember the approval for the
-session. ``after_tool`` returns a :class:`~kennel.ToolResult` to replace the
-result, or ``None`` to keep it. A hook that raises fails the tool call: a broken
+rewrite the arguments (they are re-validated and matched against the permission
+rules again, so ``deny`` still wins) or remember the approval for the session
+(for the final arguments, once the call is certain to run). ``after_tool``
+returns a :class:`~kennel.ToolResult` to replace the result, or ``None`` to keep it. A hook that raises fails the tool call: a broken
 policy is an error, not an absence of policy.
 """
 

@@ -138,9 +138,16 @@ DEFAULT_MODE = PermissionMode.DEFAULT
 class Allow:
     """Let the call proceed, optionally with corrected arguments.
 
-    ``updated_arguments`` replaces the call's arguments (they are re-validated).
+    ``updated_arguments`` replaces the call's arguments. The new arguments are
+    **re-validated** (``Tool.validate``, so the workspace boundary still applies) and
+    **re-matched** against the permission rules: if they hit a ``deny`` rule the call is
+    denied, whether a ``before_tool`` hook or the prompter rewrote them. A re-match that
+    lands on ``ask`` does not prompt again — the prompter approved these arguments.
+
     ``remember="session"`` grants the tool for the rest of the session, like
-    :attr:`Approval.SESSION` (within the tool's :meth:`~kennel.Tool.session_scope`).
+    :attr:`Approval.SESSION`, within the tool's :meth:`~kennel.Tool.session_scope` of the
+    **final** arguments (after every rewrite). The grant is recorded only once the call is
+    certain to run; a call stopped by validation, a later hook or a deny rule grants nothing.
     """
 
     updated_arguments: Mapping[str, Any] | None = None
@@ -190,11 +197,17 @@ class PermissionRule:
 
 @dataclass(frozen=True)
 class PermissionOutcome:
-    """The resolved answer for one call, richer than a bool."""
+    """The resolved answer for one call, richer than a bool.
+
+    ``remember_session`` says the answer was "allow for this session". Recording that grant
+    is left to whoever knows the call will run with which arguments (the tool runner, or
+    :meth:`PermissionManager.decide` by default), through :meth:`PermissionManager.grant_session`.
+    """
 
     allowed: bool
     message: str | None = None
     updated_arguments: Mapping[str, Any] | None = None
+    remember_session: bool = False
 
 
 Prompter = Callable[[PermissionRequest], "Approval | Allow | Deny"]
@@ -351,6 +364,8 @@ class PermissionManager:
         *,
         matcher: RuleMatcher | None = None,
         decision: Decision | None = None,
+        remember: bool = True,
+        session_approved: bool = False,
     ) -> PermissionOutcome:
         """Resolve one call, prompting if the policy says ``ask``.
 
@@ -359,6 +374,14 @@ class PermissionManager:
         The prompter may answer with an :class:`Approval`, or with
         :class:`Allow` / :class:`Deny` to add a reason or corrected arguments;
         both reach the caller through :class:`PermissionOutcome`.
+
+        With ``remember`` (the default) an "allow for this session" answer is
+        granted here, for ``request.scope``. The tool runner passes ``False`` and
+        grants it itself once the call is certain to run, for the scope of the
+        final arguments (``outcome.remember_session`` tells it to).
+        ``session_approved`` says an earlier answer for this very call (a
+        ``before_tool`` hook's ``Allow(remember="session")``) already allowed it
+        for the session: it counts like an existing grant, so ``deny`` still wins.
         """
         if decision is None:
             decision = self.decision_for(request.tool_name, request.kind, request.arguments, matcher)
@@ -366,32 +389,35 @@ class PermissionManager:
             return PermissionOutcome(True)
         if decision is Decision.DENY:
             return PermissionOutcome(False)
+        if session_approved:
+            return PermissionOutcome(True, remember_session=True)
         if self.has_session_grant(request.tool_name, request.scope):
             return PermissionOutcome(True)
         if self._prompter is None:
             return PermissionOutcome(False)  # non-interactive: ask => deny
-        return self.resolve(request.tool_name, self._prompter(request), scope=request.scope)
+        outcome = self.resolve(request.tool_name, self._prompter(request))
+        if remember and outcome.remember_session:
+            self.grant_session(request.tool_name, request.scope)
+        return outcome
 
-    def resolve(
-        self, tool_name: str, answer: Approval | Allow | Deny | None, *, scope: str | None = None
-    ) -> PermissionOutcome:
+    def resolve(self, tool_name: str, answer: Approval | Allow | Deny | None) -> PermissionOutcome:
         """Interpret one answer about ``tool_name``, wherever it came from.
 
         Prompters and application hooks speak the same vocabulary, so what an
-        ``Allow`` or a ``Deny`` *means* — including remembering a grant for the
-        session, within ``scope`` (the tool's :meth:`~kennel.Tool.session_scope`)
-        — is decided here and nowhere else. ``None`` means "no opinion"
-        and leaves the call allowed to continue.
+        ``Allow`` or a ``Deny`` *means* is decided here and nowhere else.
+        ``None`` means "no opinion" and leaves the call allowed to continue.
+        "Allow for this session" is reported as ``remember_session`` and not
+        granted here: the grant belongs to the arguments the call finally runs
+        with, which only the caller knows (:meth:`grant_session`).
         """
         if isinstance(answer, Deny):
             return PermissionOutcome(False, message=answer.message)
         if isinstance(answer, Allow):
-            if answer.remember_session:
-                self.grant_session(tool_name, scope)
-            return PermissionOutcome(True, updated_arguments=answer.updated_arguments)
+            return PermissionOutcome(
+                True, updated_arguments=answer.updated_arguments, remember_session=answer.remember_session
+            )
         if answer is Approval.SESSION:
-            self.grant_session(tool_name, scope)
-            return PermissionOutcome(True)
+            return PermissionOutcome(True, remember_session=True)
         if answer is None:
             return PermissionOutcome(True)
         return PermissionOutcome(answer is Approval.ONCE)

@@ -135,8 +135,9 @@ class Agent:
         """Open a session; with ``session_id`` and a :attr:`session_store`, resume that conversation.
 
         The restored session reports ``resumed`` True when saved turns were found (an id with
-        nothing saved starts empty under that id). With a store, the id must be 1-64 letters,
-        digits, ``-`` or ``_``, and an id another open session holds is refused; both raise
+        nothing saved starts empty under that id). With or without a store, a ``session_id``
+        must be 1-64 letters, digits, ``-`` or ``_`` (it names the event log and the
+        transcript); with a store, an id another open session holds is refused too. Both raise
         :class:`~kennel.errors.ConfigurationError`.
         """
         return Session(self, session_id=session_id)
