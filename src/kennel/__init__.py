@@ -56,7 +56,7 @@ from .sessions import FileSessionStore, SessionStore
 from .tools.base import Tool, ToolContext, ToolLimits, ToolParameter, ToolResult
 from .workspace import Workspace
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Agent",
