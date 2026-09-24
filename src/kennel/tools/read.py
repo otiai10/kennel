@@ -17,7 +17,7 @@ class ReadTool(Tool):
     description = (
         "Read a text file from the workspace with line numbers. Reads are bounded: give "
         "start_line and end_line to read a specific range, and read large files in "
-        "chunks. Use grep first to find the relevant lines instead of reading whole files."
+        "chunks."
     )
     permission = PermissionKind.READ
     parameters = (

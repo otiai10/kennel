@@ -20,8 +20,8 @@ class GrepTool(Tool):
     name = "grep"
     description = (
         "Search file contents in the workspace with a regular expression. Returns "
-        "'path:line: text' matches (bounded). Prefer grep to locate relevant lines, then "
-        "read only the needed line range."
+        "'path:line: text' matches (bounded). It finds only text the pattern matches "
+        "literally, so it misses content phrased in other words."
     )
     permission = PermissionKind.READ
     parameters = (
