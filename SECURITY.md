@@ -53,8 +53,12 @@ after argument validation and **before** the permission check, so an application
 deny calls the permission policy would allow (`kennel.Hooks`). Through their return value,
 hooks only tighten: an `Allow` still goes through the normal permission check, and the only
 thing it can skip is the interactive prompt (`Allow(remember="session")` — the same grant
-the user could give from the prompt). Hook-rewritten arguments are re-validated and still
-resolved through the workspace boundary. A hook that raises fails the tool call rather than
+the user could give from the prompt). Rewritten arguments — from a hook or from the
+prompter's `Allow(updated_arguments=)` — are re-validated, still resolved through the
+workspace boundary, and matched against the permission rules again: a rewrite that hits a
+`deny` rule is denied, so `deny` always wins over an approval too. A session grant covers the
+scope of the arguments the call finally runs with (for `fetch`, the host after any rewrite)
+and is recorded only once the call is certain to run. A hook that raises fails the tool call rather than
 being ignored, so a crashing policy cannot silently disable itself. `before_tool` and
 `after_tool` fail the tool call; a `before_prompt` hook has no tool call to fail, so it fails
 the turn instead — `Session.run()` raises `HookError` (a `KennelError`) after emitting

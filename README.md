@@ -421,8 +421,10 @@ agent.hooks.before_tool.append(another_guard)   # also fine after construction
 - `before_tool(call, ctx)` runs after the arguments are validated and **before** the
   permission check, so a policy can deny what the permission policy would have allowed.
   `Deny` records the call as `blocked`, emits `tool.blocked` and returns the message to the
-  model; `Allow(updated_arguments=...)` re-validates and continues; `Allow(remember="session")`
-  grants the tool for the session.
+  model; `Allow(updated_arguments=...)` re-validates the new arguments and matches them
+  against the permission rules again, so a rewrite that hits a `deny` rule is denied;
+  `Allow(remember="session")` grants the tool for the session, for the arguments the call
+  finally runs with, and only once it is certain to run.
 - `after_tool(call, result, ctx)` may return a `ToolResult` to replace the result. The
   replacement is bounded by the same output limit.
 - `before_prompt(prompt, session)` returns text appended to the prompt sent to the model.
@@ -449,7 +451,11 @@ def prompter(request):
 ```
 
 `Deny.message` is what the model is told, so make it actionable; `Allow(updated_arguments=)`
-corrects the call before it runs.
+corrects the call before it runs. Like a hook's, the prompter's rewrite is re-validated and
+re-matched against the rules: `deny` still wins (the call is `denied`), while a rewrite that
+lands on `ask` runs without asking twice. `remember="session"` / `Approval.SESSION` grant the
+scope of the final arguments (for `fetch`, the rewritten host), and nothing is granted when
+the call does not run.
 
 Custom tools subclass `kennel.Tool` and are passed alongside built-in names:
 

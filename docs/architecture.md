@@ -57,8 +57,8 @@ For every tool call `ToolRunner.invoke` does, in this order:
 
 1. validate and coerce the arguments (`Tool.validate`)
 2. guardrails: per-turn budget and repeated-call detection. A call that repeats one already made among the last few is refused instead of run (`max_repeats`); `max_repeat_refusals` such refusals in a row (reset by any call that is not one) make the runner give up on that call for the rest of the turn — `repeat_wedged`, sticky for the turn, and the call's answer becomes the same terminal instruction a spent budget gives. A call with different arguments is still run: narrowing the request is what the notice asked for. Without it a model that ignores a refusal spends the whole budget on one call and the user loses the turn (#58); with it a chat-style loop ends the turn, and a provider running its own loop (Apple) at least receives that instruction early, since a tool callback cannot stop its loop
-3. `before_tool` hooks, which may `Deny` (recorded as `blocked`, `tool.blocked` emitted) or `Allow(updated_arguments=)` (re-validated)
-4. the permission decision on the arguments the tool will actually run with: `PermissionManager.decision_for(name, kind, arguments, tool.match_rule)`, then `decide()` prompts if it says `ask`
+3. `before_tool` hooks, which may `Deny` (recorded as `blocked`, `tool.blocked` emitted) or `Allow(updated_arguments=)` (re-validated here, re-matched in step 4)
+4. the permission decision on the arguments the tool will actually run with: `PermissionManager.decision_for(name, kind, arguments, tool.match_rule)`, then `decide()` prompts if it says `ask`. A prompter that answers `Allow(updated_arguments=)` has its arguments re-validated and passed through `decision_for` again; only `deny` counts there (status `denied`, `permission.denied`), because the prompter approved exactly those arguments and is not asked twice (#73). "Allow for this session" — a hook's or the prompter's — comes back as `PermissionOutcome.remember_session` and is granted here, after every check has passed, with `pm.grant_session(name, tool.session_scope(args))` on the final arguments; `decide(remember=False, session_approved=...)` is how the runner keeps that grant (and a hook's session approval) inside `PermissionManager` without recording it early
 5. `tool.execute`
 6. `after_tool` hooks, which may replace the result; the replacement is bounded like any other
 7. output bounding and the `tool.completed` / `tool.failed` event. `tool.completed` carries the result's size in bytes and in estimated tokens, plus `window_exceeded` for the case where that one result is already bigger than the provider's declared window — the runner is where the bytes are counted, so it is where the comparison belongs, and the CLI only draws it
@@ -190,6 +190,6 @@ lock, so nothing is sent after a cancel. Redirects are followed by the tool, one
 
 Rules match the normalised host (`FetchTool.match_rule`), and "allow for this session" is
 remembered per host through `Tool.session_scope`: `PermissionManager` stores grants as
-`(tool name, scope)`, the runner passes the scope with the `PermissionRequest` and to
-`PermissionManager.resolve` for a hook's `Allow(remember="session")`. The default scope
+`(tool name, scope)`, the runner passes the scope with the `PermissionRequest` and, once the
+call is certain to run, grants the scope of its final arguments (step 4 above). The default scope
 `None` is the whole tool, which every other tool keeps.
