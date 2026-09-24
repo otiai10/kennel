@@ -914,9 +914,9 @@ providers for a larger context window (`llama-server` over HTTP, `llama-cpp` in 
 process), and the observability work that fills out this release: a per-session JSONL event
 log, tool result sizes and remaining context shown without `--verbose`, failed turns kept in
 the history with the facts of the failure, and a tool result too big for the window withheld
-instead of failing the turn, and opt-in web search through SearXNG or Brave. Not yet:
-fetching a web page's contents, forking, listing or naming saved sessions (resuming one is
-in: `--continue` / `--resume`), MCP,
+instead of failing the turn, opt-in web search through SearXNG or Brave, and opt-in
+fetching of public web pages. Not yet: forking, listing or naming saved sessions (resuming
+one is in: `--continue` / `--resume`), MCP,
 subagents, sandboxed shell. Design principles live in
 [docs/constitution.md](docs/constitution.md); the comparison with Claude Code that drove the
 current roadmap is in `docs/history/`.
